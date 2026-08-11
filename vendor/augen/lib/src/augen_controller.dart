@@ -1,0 +1,2901 @@
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, visibleForTesting;
+import 'package:flutter/services.dart'
+    show MissingPluginException, PlatformException, rootBundle;
+import 'models/ar_anchor.dart';
+import 'models/ar_node.dart';
+import 'models/ar_plane.dart';
+import 'models/ar_hit_result.dart';
+import 'models/ar_session_config.dart';
+import 'models/vector3.dart';
+import 'models/quaternion.dart';
+import 'models/ar_animation.dart';
+import 'models/animation_blend.dart';
+import 'models/animation_transition.dart';
+import 'models/animation_state_machine.dart';
+import 'models/animation_blend_tree.dart';
+import 'models/ar_image_target.dart';
+import 'models/ar_tracked_image.dart';
+import 'models/ar_face.dart';
+import 'models/ar_cloud_anchor.dart';
+import 'models/ar_occlusion.dart';
+import 'models/ar_physics.dart';
+import 'models/ar_multi_user.dart';
+import 'models/ar_lighting.dart';
+import 'models/ar_environmental_probes.dart';
+import 'models/ar_marker_target.dart';
+import 'models/ar_tracked_marker.dart';
+import 'models/ar_marker_config.dart';
+import 'platform/augen_platform_backend.dart';
+import 'platform/augen_platform_factory.dart';
+
+/// Controller for managing AR session
+class AugenController {
+  final AugenPlatformBackend _backend;
+  final int viewId;
+
+  final StreamController<List<ARPlane>> _planesController =
+      StreamController<List<ARPlane>>.broadcast();
+  final StreamController<List<ARAnchor>> _anchorsController =
+      StreamController<List<ARAnchor>>.broadcast();
+  final StreamController<String> _errorController =
+      StreamController<String>.broadcast();
+  final StreamController<AnimationStatus> _animationStatusController =
+      StreamController<AnimationStatus>.broadcast();
+  final StreamController<TransitionStatus> _transitionStatusController =
+      StreamController<TransitionStatus>.broadcast();
+  final StreamController<StateMachineStatus> _stateMachineStatusController =
+      StreamController<StateMachineStatus>.broadcast();
+  final StreamController<List<ARImageTarget>> _imageTargetsController =
+      StreamController<List<ARImageTarget>>.broadcast();
+  final StreamController<List<ARTrackedImage>> _trackedImagesController =
+      StreamController<List<ARTrackedImage>>.broadcast();
+  final StreamController<List<ARFace>> _facesController =
+      StreamController<List<ARFace>>.broadcast();
+  final StreamController<List<ARCloudAnchor>> _cloudAnchorsController =
+      StreamController<List<ARCloudAnchor>>.broadcast();
+  final StreamController<CloudAnchorStatus> _cloudAnchorStatusController =
+      StreamController<CloudAnchorStatus>.broadcast();
+  final StreamController<List<AROcclusion>> _occlusionsController =
+      StreamController<List<AROcclusion>>.broadcast();
+  final StreamController<OcclusionStatus> _occlusionStatusController =
+      StreamController<OcclusionStatus>.broadcast();
+  final StreamController<List<ARPhysicsBody>> _physicsBodiesController =
+      StreamController<List<ARPhysicsBody>>.broadcast();
+  final StreamController<List<PhysicsConstraint>>
+  _physicsConstraintsController =
+      StreamController<List<PhysicsConstraint>>.broadcast();
+  final StreamController<PhysicsStatus> _physicsStatusController =
+      StreamController<PhysicsStatus>.broadcast();
+
+  // Multi-user stream controllers
+  final StreamController<ARMultiUserSession> _multiUserSessionController =
+      StreamController<ARMultiUserSession>.broadcast();
+  final StreamController<List<MultiUserParticipant>>
+  _multiUserParticipantsController =
+      StreamController<List<MultiUserParticipant>>.broadcast();
+  final StreamController<List<MultiUserSharedObject>>
+  _multiUserSharedObjectsController =
+      StreamController<List<MultiUserSharedObject>>.broadcast();
+  final StreamController<MultiUserSessionStatus>
+  _multiUserSessionStatusController =
+      StreamController<MultiUserSessionStatus>.broadcast();
+
+  // Lighting stream controllers
+  final StreamController<List<ARLight>> _lightsController =
+      StreamController<List<ARLight>>.broadcast();
+  final StreamController<ARLightingConfig> _lightingConfigController =
+      StreamController<ARLightingConfig>.broadcast();
+  final StreamController<ARLightingStatus> _lightingStatusController =
+      StreamController<ARLightingStatus>.broadcast();
+
+  // Environmental Probes Stream Controllers
+  final StreamController<List<AREnvironmentalProbe>> _probesController =
+      StreamController<List<AREnvironmentalProbe>>.broadcast();
+  final StreamController<AREnvironmentalProbeConfig> _probeConfigController =
+      StreamController<AREnvironmentalProbeConfig>.broadcast();
+  final StreamController<AREnvironmentalProbeStatus> _probeStatusController =
+      StreamController<AREnvironmentalProbeStatus>.broadcast();
+
+  // Marker tracking stream controllers
+  final StreamController<List<ARMarkerTarget>> _markerTargetsController =
+      StreamController<List<ARMarkerTarget>>.broadcast();
+  final StreamController<List<ARTrackedMarker>> _trackedMarkersController =
+      StreamController<List<ARTrackedMarker>>.broadcast();
+
+  bool _isDisposed = false;
+
+  AugenController(this.viewId) : _backend = createPlatformBackend(viewId) {
+    _backend.onPlatformCallback = _handlePlatformCallback;
+  }
+
+  /// Whether this controller has been disposed.
+  ///
+  /// Use this to guard UI toggle callbacks that may fire after the AR view
+  /// has been torn down (e.g. tab switches, navigation pops):
+  ///
+  /// ```dart
+  /// if (controller.isDisposed) return;
+  /// await controller.setImageTrackingEnabled(enabled);
+  /// ```
+  bool get isDisposed => _isDisposed;
+
+  /// Run a feature support check that **never throws** when the native
+  /// implementation is missing or the controller has been disposed.
+  ///
+  /// Returns `false` for any of:
+  /// - controller already disposed
+  /// - native method not implemented on the current platform
+  /// - `PlatformException` from the platform side
+  ///
+  /// Errors are reported once (debug-only) to avoid log spam.
+  Future<bool> _safeSupportCheck(
+    String name,
+    Future<bool> Function() check,
+  ) async {
+    if (_isDisposed) return false;
+    try {
+      return await check();
+    } on MissingPluginException catch (e) {
+      if (kDebugMode) {
+        debugPrint('[augen] $name is not implemented on this platform: ${e.message}');
+      }
+      return false;
+    } on PlatformException catch (e) {
+      if (kDebugMode) {
+        debugPrint('[augen] $name platform error: ${e.message}');
+      }
+      return false;
+    } on UnsupportedError catch (e) {
+      if (kDebugMode) {
+        debugPrint('[augen] $name unsupported on this platform: ${e.message}');
+      }
+      return false;
+    }
+    // Note: programming errors (TypeError, AssertionError, StateError, etc.)
+    // intentionally propagate so they show up in tests and crash reports.
+  }
+
+  /// Like [_safeSupportCheck] but for `void`-returning toggle operations
+  /// (e.g. `setImageTrackingEnabled`). Silently no-ops if the controller is
+  /// disposed; surfaces real failures through [errorStream] without
+  /// crashing the caller.
+  Future<bool> _safeToggle(
+    String name,
+    Future<void> Function() op,
+  ) async {
+    if (_isDisposed) {
+      if (kDebugMode) {
+        debugPrint('[augen] $name ignored — controller is disposed');
+      }
+      return false;
+    }
+    try {
+      await op();
+      return true;
+    } on MissingPluginException catch (e) {
+      _errorController.add(
+        '$name is not supported on this platform.',
+      );
+      if (kDebugMode) {
+        debugPrint('[augen] $name MissingPluginException: ${e.message}');
+      }
+      return false;
+    } on PlatformException catch (e) {
+      _errorController.add('$name failed: ${e.message}');
+      return false;
+    } on UnsupportedError catch (e) {
+      _errorController.add('$name is not supported: ${e.message}');
+      return false;
+    }
+    // Programming errors (TypeError, AssertionError, StateError, etc.)
+    // propagate so they're caught in tests rather than silently swallowed.
+  }
+
+  /// Stream of detected planes
+  Stream<List<ARPlane>> get planesStream => _planesController.stream;
+
+  /// Stream of AR anchors
+  Stream<List<ARAnchor>> get anchorsStream => _anchorsController.stream;
+
+  /// Stream of errors
+  Stream<String> get errorStream => _errorController.stream;
+
+  /// Stream of animation status updates
+  Stream<AnimationStatus> get animationStatusStream =>
+      _animationStatusController.stream;
+
+  /// Stream of animation transition status updates
+  Stream<TransitionStatus> get transitionStatusStream =>
+      _transitionStatusController.stream;
+
+  /// Stream of animation state machine status updates
+  Stream<StateMachineStatus> get stateMachineStatusStream =>
+      _stateMachineStatusController.stream;
+
+  /// Stream of image targets
+  Stream<List<ARImageTarget>> get imageTargetsStream =>
+      _imageTargetsController.stream;
+
+  /// Stream of tracked images
+  Stream<List<ARTrackedImage>> get trackedImagesStream =>
+      _trackedImagesController.stream;
+
+  /// Stream of tracked faces
+  Stream<List<ARFace>> get facesStream => _facesController.stream;
+
+  /// Stream of cloud anchors
+  Stream<List<ARCloudAnchor>> get cloudAnchorsStream =>
+      _cloudAnchorsController.stream;
+
+  /// Stream of cloud anchor status updates
+  Stream<CloudAnchorStatus> get cloudAnchorStatusStream =>
+      _cloudAnchorStatusController.stream;
+
+  /// Stream of occlusions
+  Stream<List<AROcclusion>> get occlusionsStream =>
+      _occlusionsController.stream;
+
+  /// Stream of occlusion status updates
+  Stream<OcclusionStatus> get occlusionStatusStream =>
+      _occlusionStatusController.stream;
+
+  /// Stream of physics bodies updates
+  Stream<List<ARPhysicsBody>> get physicsBodiesStream =>
+      _physicsBodiesController.stream;
+
+  /// Stream of physics constraints updates
+  Stream<List<PhysicsConstraint>> get physicsConstraintsStream =>
+      _physicsConstraintsController.stream;
+
+  /// Stream of physics status updates
+  Stream<PhysicsStatus> get physicsStatusStream =>
+      _physicsStatusController.stream;
+
+  // Multi-user streams
+  Stream<ARMultiUserSession> get multiUserSessionStream =>
+      _multiUserSessionController.stream;
+  Stream<List<MultiUserParticipant>> get multiUserParticipantsStream =>
+      _multiUserParticipantsController.stream;
+  Stream<List<MultiUserSharedObject>> get multiUserSharedObjectsStream =>
+      _multiUserSharedObjectsController.stream;
+  Stream<MultiUserSessionStatus> get multiUserSessionStatusStream =>
+      _multiUserSessionStatusController.stream;
+
+  // Lighting streams
+  Stream<List<ARLight>> get lightsStream => _lightsController.stream;
+  Stream<ARLightingConfig> get lightingConfigStream =>
+      _lightingConfigController.stream;
+  Stream<ARLightingStatus> get lightingStatusStream =>
+      _lightingStatusController.stream;
+
+  // Environmental Probes Streams
+  /// Stream of environmental probes updates
+  Stream<List<AREnvironmentalProbe>> get probesStream =>
+      _probesController.stream;
+
+  /// Stream of environmental probe configuration updates
+  Stream<AREnvironmentalProbeConfig> get probeConfigStream =>
+      _probeConfigController.stream;
+
+  /// Stream of environmental probe status updates
+  Stream<AREnvironmentalProbeStatus> get probeStatusStream =>
+      _probeStatusController.stream;
+
+  /// Stream of marker targets
+  Stream<List<ARMarkerTarget>> get markerTargetsStream =>
+      _markerTargetsController.stream;
+
+  /// Stream of tracked markers
+  Stream<List<ARTrackedMarker>> get trackedMarkersStream =>
+      _trackedMarkersController.stream;
+
+  /// Initialize AR session with configuration
+  Future<void> initialize(ARSessionConfig config) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.initialize(config.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to initialize AR: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Check if AR is supported on this device.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isARSupported() =>
+      _safeSupportCheck('isARSupported', _backend.isARSupported);
+
+  /// Add a node to the AR scene
+  Future<void> addNode(ARNode node) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final nodeData = node.toMap();
+
+      // If it's a model node with an asset path, load the asset data
+      if (node.type == NodeType.model &&
+          node.modelPath != null &&
+          !node.modelPath!.startsWith('http')) {
+        final modelBytes = await _loadAsset(node.modelPath!);
+        nodeData['modelData'] = modelBytes;
+      }
+
+      await _backend.addNode(nodeData);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add node: ${e.message}');
+      rethrow;
+    }
+  }
+
+  // X5: Process-wide LRU-ish asset cache. Static so it survives across
+  // controllers and view recreations (the common AR re-init case).
+  static final Map<String, Uint8List> _assetCache = <String, Uint8List>{};
+  static const int _assetCacheMaxBytes = 50 * 1024 * 1024; // 50 MB
+  static int _assetCacheCurrentBytes = 0;
+
+  /// Load asset file as bytes, with an in-memory cache to avoid repeated
+  /// `rootBundle.load` decoding for the same asset path.
+  Future<Uint8List> _loadAsset(String assetPath) async {
+    final cached = _assetCache[assetPath];
+    if (cached != null) {
+      // Touch for simple LRU-ish behavior.
+      _assetCache.remove(assetPath);
+      _assetCache[assetPath] = cached;
+      return cached;
+    }
+
+    final ByteData data = await rootBundle.load(assetPath);
+    final bytes = data.buffer.asUint8List();
+
+    // Evict oldest entries until there is room for the new asset.
+    while (_assetCache.isNotEmpty &&
+        _assetCacheCurrentBytes + bytes.length > _assetCacheMaxBytes) {
+      final oldestKey = _assetCache.keys.first;
+      final removed = _assetCache.remove(oldestKey);
+      if (removed != null) {
+        _assetCacheCurrentBytes -= removed.length;
+        if (_assetCacheCurrentBytes < 0) _assetCacheCurrentBytes = 0;
+      }
+    }
+
+    if (bytes.length <= _assetCacheMaxBytes) {
+      _assetCache[assetPath] = bytes;
+      _assetCacheCurrentBytes += bytes.length;
+    }
+
+    return bytes;
+  }
+
+  /// Add a custom 3D model from asset
+  Future<void> addModelFromAsset({
+    required String id,
+    required String assetPath,
+    required Vector3 position,
+    Quaternion rotation = const Quaternion(0, 0, 0, 1),
+    Vector3 scale = const Vector3(1, 1, 1),
+    ModelFormat? modelFormat,
+    Map<String, dynamic>? properties,
+  }) async {
+    final node = ARNode.fromModel(
+      id: id,
+      modelPath: assetPath,
+      position: position,
+      rotation: rotation,
+      scale: scale,
+      modelFormat: modelFormat,
+      properties: properties,
+    );
+    await addNode(node);
+  }
+
+  /// Add a custom 3D model from URL
+  Future<void> addModelFromUrl({
+    required String id,
+    required String url,
+    required Vector3 position,
+    Quaternion rotation = const Quaternion(0, 0, 0, 1),
+    Vector3 scale = const Vector3(1, 1, 1),
+    ModelFormat? modelFormat,
+    Map<String, dynamic>? properties,
+  }) async {
+    final node = ARNode.fromModel(
+      id: id,
+      modelPath: url,
+      position: position,
+      rotation: rotation,
+      scale: scale,
+      modelFormat: modelFormat,
+      properties: properties,
+    );
+    await addNode(node);
+  }
+
+  /// Remove a node from the AR scene
+  Future<void> removeNode(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeNode(nodeId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove node: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update an existing node
+  Future<void> updateNode(ARNode node) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateNode(node.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update node: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Perform hit test at screen coordinates
+  Future<List<ARHitResult>> hitTest(double x, double y) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.hitTest(x, y);
+      return result.map((e) => ARHitResult.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to perform hit test: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Add an anchor at the specified position
+  Future<ARAnchor?> addAnchor(Vector3 position) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.addAnchor(position.toMap());
+      return result != null ? ARAnchor.fromMap(result) : null;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add anchor: ${e.message}');
+      return null;
+    }
+  }
+
+  /// Remove an anchor
+  Future<void> removeAnchor(String anchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeAnchor(anchorId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Pause AR session
+  Future<void> pause() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.pause();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to pause AR: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Resume AR session
+  Future<void> resume() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.resume();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to resume AR: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Reset AR session
+  Future<void> reset() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.reset();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to reset AR: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Test-only hook to invoke the platform callback dispatcher directly,
+  /// without going through the MethodChannel codec. This lets tests exercise
+  /// the W14 fast-path where the web backend passes a typed
+  /// `List<ARTrackedMarker>` straight through.
+  @visibleForTesting
+  void debugHandlePlatformCallback(String method, dynamic arguments) {
+    _handlePlatformCallback(method, arguments);
+  }
+
+  /// Test-only view of the static asset cache size, in bytes.
+  @visibleForTesting
+  static int debugAssetCacheSizeBytes() => _assetCacheCurrentBytes;
+
+  /// Test-only view of the static asset cache key count.
+  @visibleForTesting
+  static int debugAssetCacheEntryCount() => _assetCache.length;
+
+  /// Test-only: clear the static asset cache.
+  @visibleForTesting
+  static void debugClearAssetCache() {
+    _assetCache.clear();
+    _assetCacheCurrentBytes = 0;
+  }
+
+  /// Test-only: load an asset through the cache. Mirrors the internal path
+  /// used by [addNode] / [addNodeToTrackedImage].
+  @visibleForTesting
+  Future<Uint8List> debugLoadAsset(String assetPath) => _loadAsset(assetPath);
+
+  void _handlePlatformCallback(String method, dynamic arguments) {
+    if (_isDisposed) return;
+
+    switch (method) {
+      case 'onPlanesUpdated':
+        final planesData = arguments as List;
+        final planes = planesData
+            .map((e) => ARPlane.fromMap(e as Map))
+            .toList();
+        _planesController.add(planes);
+        break;
+      case 'onAnchorsUpdated':
+        final anchorsData = arguments as List;
+        final anchors = anchorsData
+            .map((e) => ARAnchor.fromMap(e as Map))
+            .toList();
+        _anchorsController.add(anchors);
+        break;
+      case 'onError':
+        final error = arguments as String;
+        _errorController.add(error);
+        break;
+      case 'onAnimationStatus':
+        final statusData = arguments as Map;
+        final status = AnimationStatus.fromMap(statusData);
+        _animationStatusController.add(status);
+        break;
+      case 'onTransitionStatus':
+        final statusData = arguments as Map;
+        final status = TransitionStatus.fromMap(statusData);
+        _transitionStatusController.add(status);
+        break;
+      case 'onStateMachineStatus':
+        final statusData = arguments as Map;
+        final status = StateMachineStatus.fromMap(statusData);
+        _stateMachineStatusController.add(status);
+        break;
+      case 'onImageTargetsUpdated':
+        final targetsData = arguments as List;
+        final targets = targetsData
+            .map((e) => ARImageTarget.fromMap(e as Map))
+            .toList();
+        _imageTargetsController.add(targets);
+        break;
+      case 'onTrackedImagesUpdated':
+        final trackedData = arguments as List;
+        final trackedImages = trackedData
+            .map((e) => ARTrackedImage.fromMap(e as Map))
+            .toList();
+        _trackedImagesController.add(trackedImages);
+        break;
+      case 'onFacesUpdated':
+        final facesData = arguments as List;
+        final faces = facesData.map((e) => ARFace.fromMap(e as Map)).toList();
+        _facesController.add(faces);
+        break;
+      case 'onCloudAnchorsUpdated':
+        final anchorsData = arguments as List;
+        final anchors = anchorsData
+            .map((e) => ARCloudAnchor.fromMap(e as Map))
+            .toList();
+        _cloudAnchorsController.add(anchors);
+        break;
+      case 'onCloudAnchorStatusUpdated':
+        final statusData = arguments as Map;
+        final status = CloudAnchorStatus.fromMap(statusData);
+        _cloudAnchorStatusController.add(status);
+        break;
+      case 'onOcclusionsUpdated':
+        final occlusionsData = arguments as List;
+        final occlusions = occlusionsData
+            .map((e) => AROcclusion.fromMap(e as Map<String, dynamic>))
+            .toList();
+        _occlusionsController.add(occlusions);
+        break;
+      case 'onOcclusionStatusUpdated':
+        final statusData = arguments as Map<String, dynamic>;
+        final status = OcclusionStatus.fromMap(statusData);
+        _occlusionStatusController.add(status);
+        break;
+      case 'onPhysicsBodiesUpdated':
+        final bodiesData = arguments as List;
+        final bodies = bodiesData
+            .map((e) => ARPhysicsBody.fromMap(e as Map<String, dynamic>))
+            .toList();
+        _physicsBodiesController.add(bodies);
+        break;
+      case 'onPhysicsConstraintsUpdated':
+        final constraintsData = arguments as List;
+        final constraints = constraintsData
+            .map((e) => PhysicsConstraint.fromMap(e as Map<String, dynamic>))
+            .toList();
+        _physicsConstraintsController.add(constraints);
+        break;
+      case 'onPhysicsStatusUpdated':
+        final statusData = arguments as Map<String, dynamic>;
+        final status = PhysicsStatus.fromMap(statusData);
+        _physicsStatusController.add(status);
+        break;
+      case 'onMultiUserSessionUpdated':
+        final sessionData = arguments as Map<String, dynamic>;
+        final session = ARMultiUserSession.fromMap(sessionData);
+        _multiUserSessionController.add(session);
+        break;
+      case 'onMultiUserParticipantsUpdated':
+        final participantsData = arguments as List;
+        final participants = participantsData
+            .map((e) => MultiUserParticipant.fromMap(e as Map<String, dynamic>))
+            .toList();
+        _multiUserParticipantsController.add(participants);
+        break;
+      case 'onMultiUserSharedObjectsUpdated':
+        final objectsData = arguments as List;
+        final objects = objectsData
+            .map(
+              (e) => MultiUserSharedObject.fromMap(e as Map<String, dynamic>),
+            )
+            .toList();
+        _multiUserSharedObjectsController.add(objects);
+        break;
+      case 'onMultiUserSessionStatusUpdated':
+        final statusData = arguments as Map<String, dynamic>;
+        final status = MultiUserSessionStatus.fromMap(statusData);
+        _multiUserSessionStatusController.add(status);
+        break;
+      case 'onLightsUpdated':
+        final lightsData = arguments as List<dynamic>;
+        final lights = lightsData
+            .map(
+              (light) =>
+                  ARLight.fromMap(Map<String, dynamic>.from(light as Map)),
+            )
+            .toList();
+        _lightsController.add(lights);
+        break;
+      case 'onLightingConfigUpdated':
+        final configData = arguments as Map<String, dynamic>;
+        final config = ARLightingConfig.fromMap(configData);
+        _lightingConfigController.add(config);
+        break;
+      case 'onLightingStatusUpdated':
+        final statusData = arguments as Map<String, dynamic>;
+        final status = ARLightingStatus.fromMap(statusData);
+        _lightingStatusController.add(status);
+        break;
+      case 'onProbesUpdated':
+        final probesData = arguments as List<dynamic>;
+        final probes = probesData
+            .map(
+              (probe) => AREnvironmentalProbe.fromMap(
+                Map<String, dynamic>.from(probe as Map),
+              ),
+            )
+            .toList();
+        _probesController.add(probes);
+        break;
+      case 'onProbeConfigUpdated':
+        final configData = arguments as Map<String, dynamic>;
+        final config = AREnvironmentalProbeConfig.fromMap(configData);
+        _probeConfigController.add(config);
+        break;
+      case 'onProbeStatusUpdated':
+        final statusData = arguments as Map<String, dynamic>;
+        final status = AREnvironmentalProbeStatus.fromMap(statusData);
+        _probeStatusController.add(status);
+        break;
+      case 'onMarkerTargetsUpdated':
+        final targetsData = arguments as List;
+        final targets = targetsData
+            .map((e) => ARMarkerTarget.fromMap(e as Map))
+            .toList();
+        _markerTargetsController.add(targets);
+        break;
+      case 'onTrackedMarkersUpdated':
+        // W14: Fast-path for web — backend passes List<ARTrackedMarker>
+        // directly so we skip a wasteful toMap/fromMap round-trip.
+        if (arguments is List<ARTrackedMarker>) {
+          _trackedMarkersController.add(arguments);
+        } else {
+          final markersData = arguments as List;
+          final markers = markersData
+              .map((e) => ARTrackedMarker.fromMap(e as Map))
+              .toList();
+          _trackedMarkersController.add(markers);
+        }
+        break;
+    }
+  }
+
+  /// Play an animation on a node
+  Future<void> playAnimation({
+    required String nodeId,
+    required String animationId,
+    double speed = 1.0,
+    AnimationLoopMode loopMode = AnimationLoopMode.loop,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.playAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+        'speed': speed,
+        'loopMode': loopMode.name,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to play animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Pause an animation on a node
+  Future<void> pauseAnimation({
+    required String nodeId,
+    required String animationId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.pauseAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to pause animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Stop an animation on a node
+  Future<void> stopAnimation({
+    required String nodeId,
+    required String animationId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.stopAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Resume an animation on a node
+  Future<void> resumeAnimation({
+    required String nodeId,
+    required String animationId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.resumeAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to resume animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Seek to a specific time in an animation
+  Future<void> seekAnimation({
+    required String nodeId,
+    required String animationId,
+    required double time,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.seekAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+        'time': time,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to seek animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get available animations for a model node
+  Future<List<String>> getAvailableAnimations(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getAvailableAnimations(nodeId);
+      return result;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get animations: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Set animation speed
+  Future<void> setAnimationSpeed({
+    required String nodeId,
+    required String animationId,
+    required double speed,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setAnimationSpeed({
+        'nodeId': nodeId,
+        'animationId': animationId,
+        'speed': speed,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set animation speed: ${e.message}');
+      rethrow;
+    }
+  }
+
+  // ===== ANIMATION BLENDING METHODS =====
+
+  /// Play a blend set on a node
+  Future<void> playBlendSet({
+    required String nodeId,
+    required AnimationBlendSet blendSet,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.playBlendSet({
+        'nodeId': nodeId,
+        'blendSet': blendSet.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to play blend set: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Stop a blend set on a node
+  Future<void> stopBlendSet({
+    required String nodeId,
+    required String blendSetId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.stopBlendSet({
+        'nodeId': nodeId,
+        'blendSetId': blendSetId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop blend set: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update blend weights in a running blend set
+  Future<void> updateBlendWeights({
+    required String nodeId,
+    required String blendSetId,
+    required Map<String, double> weights,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateBlendWeights({
+        'nodeId': nodeId,
+        'blendSetId': blendSetId,
+        'weights': weights,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update blend weights: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Start a crossfade transition between two animations
+  Future<void> startCrossfadeTransition({
+    required String nodeId,
+    required CrossfadeTransition transition,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.startCrossfadeTransition({
+        'nodeId': nodeId,
+        'transition': transition.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to start crossfade transition: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Stop a running transition
+  Future<void> stopTransition({
+    required String nodeId,
+    required String transitionId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.stopTransition({
+        'nodeId': nodeId,
+        'transitionId': transitionId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop transition: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Start an animation state machine on a node
+  Future<void> startStateMachine({
+    required String nodeId,
+    required AnimationStateMachine stateMachine,
+    Map<String, dynamic>? initialParameters,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.startStateMachine({
+        'nodeId': nodeId,
+        'stateMachine': stateMachine.toMap(),
+        if (initialParameters != null) 'initialParameters': initialParameters,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to start state machine: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Stop an animation state machine
+  Future<void> stopStateMachine({
+    required String nodeId,
+    required String stateMachineId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.stopStateMachine({
+        'nodeId': nodeId,
+        'stateMachineId': stateMachineId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop state machine: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update parameters in a running state machine
+  Future<void> updateStateMachineParameters({
+    required String nodeId,
+    required String stateMachineId,
+    required Map<String, dynamic> parameters,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateStateMachineParameters({
+        'nodeId': nodeId,
+        'stateMachineId': stateMachineId,
+        'parameters': parameters,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update state machine parameters: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Trigger a transition in a state machine
+  Future<void> triggerStateMachineTransition({
+    required String nodeId,
+    required String stateMachineId,
+    required String targetStateId,
+    Map<String, dynamic>? parameters,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.triggerStateMachineTransition({
+        'nodeId': nodeId,
+        'stateMachineId': stateMachineId,
+        'targetStateId': targetStateId,
+        if (parameters != null) 'parameters': parameters,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to trigger state machine transition: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Start a blend tree on a node
+  Future<void> startBlendTree({
+    required String nodeId,
+    required AnimationBlendTree blendTree,
+    Map<String, dynamic>? initialParameters,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.startBlendTree({
+        'nodeId': nodeId,
+        'blendTree': blendTree.toMap(),
+        if (initialParameters != null) 'initialParameters': initialParameters,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to start blend tree: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Stop a blend tree
+  Future<void> stopBlendTree({
+    required String nodeId,
+    required String blendTreeId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.stopBlendTree({
+        'nodeId': nodeId,
+        'blendTreeId': blendTreeId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop blend tree: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update parameters in a running blend tree
+  Future<void> updateBlendTreeParameters({
+    required String nodeId,
+    required String blendTreeId,
+    required Map<String, dynamic> parameters,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateBlendTreeParameters({
+        'nodeId': nodeId,
+        'blendTreeId': blendTreeId,
+        'parameters': parameters,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update blend tree parameters: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Set animation layer weight
+  Future<void> setAnimationLayerWeight({
+    required String nodeId,
+    required int layer,
+    required double weight,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setAnimationLayerWeight({
+        'nodeId': nodeId,
+        'layer': layer,
+        'weight': weight,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to set animation layer weight: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Get current animation layers for a node
+  Future<List<Map<String, dynamic>>> getAnimationLayers(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getAnimationLayers(nodeId);
+      return result;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get animation layers: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Play additive animation on top of base layer
+  Future<void> playAdditiveAnimation({
+    required String nodeId,
+    required String animationId,
+    required int targetLayer,
+    double weight = 1.0,
+    AnimationLoopMode loopMode = AnimationLoopMode.loop,
+    List<String>? boneMask,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.playAdditiveAnimation({
+        'nodeId': nodeId,
+        'animationId': animationId,
+        'targetLayer': targetLayer,
+        'weight': weight,
+        'loopMode': loopMode.name,
+        if (boneMask != null) 'boneMask': boneMask,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to play additive animation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set bone mask for an animation layer
+  Future<void> setAnimationBoneMask({
+    required String nodeId,
+    required int layer,
+    required List<String> boneMask,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setAnimationBoneMask({
+        'nodeId': nodeId,
+        'layer': layer,
+        'boneMask': boneMask,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set animation bone mask: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get bone hierarchy for a model
+  Future<List<String>> getBoneHierarchy(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getBoneHierarchy(nodeId);
+      return result;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get bone hierarchy: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Create and play a simple crossfade between two animations
+  Future<void> crossfadeToAnimation({
+    required String nodeId,
+    required String fromAnimationId,
+    required String toAnimationId,
+    double duration = 0.3,
+    TransitionCurve curve = TransitionCurve.linear,
+  }) async {
+    final transition = CrossfadeTransition(
+      id: 'crossfade_${DateTime.now().millisecondsSinceEpoch}',
+      fromAnimationId: fromAnimationId,
+      toAnimationId: toAnimationId,
+      duration: duration,
+      curve: curve,
+    );
+
+    await startCrossfadeTransition(nodeId: nodeId, transition: transition);
+  }
+
+  /// Create and play a blend between multiple animations with weights
+  Future<void> blendAnimations({
+    required String nodeId,
+    required Map<String, double> animationWeights,
+    String? blendSetId,
+    BlendType blendType = BlendType.linear,
+    double fadeInDuration = 0.3,
+  }) async {
+    final blends = animationWeights.entries.map((entry) {
+      return AnimationBlend(animationId: entry.key, weight: entry.value);
+    }).toList();
+
+    final blendSet = AnimationBlendSet(
+      id: blendSetId ?? 'blend_${DateTime.now().millisecondsSinceEpoch}',
+      animations: blends,
+      blendType: blendType,
+      fadeInDuration: fadeInDuration,
+    );
+
+    await playBlendSet(nodeId: nodeId, blendSet: blendSet);
+  }
+
+  // ===== IMAGE TRACKING METHODS =====
+
+  /// Add an image target for tracking
+  Future<void> addImageTarget(ARImageTarget target) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.addImageTarget(target.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add image target: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove an image target
+  Future<void> removeImageTarget(String targetId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeImageTarget(targetId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove image target: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all registered image targets
+  Future<List<ARImageTarget>> getImageTargets() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getImageTargets();
+      return result.map((e) => ARImageTarget.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get image targets: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Get currently tracked images
+  Future<List<ARTrackedImage>> getTrackedImages() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getTrackedImages();
+      return result.map((e) => ARTrackedImage.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get tracked images: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Enable or disable image tracking.
+  ///
+  /// Safe to call after disposal — silently no-ops. Returns `true` on
+  /// success, `false` if the platform doesn't support it, the controller
+  /// is disposed, or an error occurred (which is also surfaced through
+  /// [errorStream]).
+  Future<bool> setImageTrackingEnabled(bool enabled) => _safeToggle(
+    'Image tracking',
+    () => _backend.setImageTrackingEnabled(enabled),
+  );
+
+  /// Check if image tracking is enabled.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isImageTrackingEnabled() => _safeSupportCheck(
+    'isImageTrackingEnabled',
+    _backend.isImageTrackingEnabled,
+  );
+
+  /// Add a node anchored to a tracked image
+  Future<void> addNodeToTrackedImage({
+    required String nodeId,
+    required String trackedImageId,
+    required ARNode node,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final nodeData = node.toMap();
+      nodeData['trackedImageId'] = trackedImageId;
+
+      // If it's a model node with an asset path, load the asset data
+      if (node.type == NodeType.model &&
+          node.modelPath != null &&
+          !node.modelPath!.startsWith('http')) {
+        final modelBytes = await _loadAsset(node.modelPath!);
+        nodeData['modelData'] = modelBytes;
+      }
+
+      await _backend.addNodeToTrackedImage({
+        'nodeId': nodeId,
+        'nodeData': nodeData,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add node to tracked image: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a node from a tracked image
+  Future<void> removeNodeFromTrackedImage(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeNodeFromTrackedImage(nodeId);
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to remove node from tracked image: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  // Face Tracking Methods
+
+  /// Enable or disable face tracking.
+  ///
+  /// Safe to call after disposal — silently no-ops. Returns `true` on
+  /// success, `false` if the platform doesn't support it, the controller
+  /// is disposed, or an error occurred (also surfaced through
+  /// [errorStream]).
+  Future<bool> setFaceTrackingEnabled(bool enabled) => _safeToggle(
+    'Face tracking',
+    () => _backend.setFaceTrackingEnabled(enabled),
+  );
+
+  /// Check if face tracking is enabled.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isFaceTrackingEnabled() => _safeSupportCheck(
+    'isFaceTrackingEnabled',
+    _backend.isFaceTrackingEnabled,
+  );
+
+  /// Get currently tracked faces
+  Future<List<ARFace>> getTrackedFaces() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getTrackedFaces();
+      return result.map((e) => ARFace.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get tracked faces: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Add a node anchored to a tracked face
+  Future<void> addNodeToTrackedFace({
+    required String nodeId,
+    required String faceId,
+    required ARNode node,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.addNodeToTrackedFace({
+        'nodeId': nodeId,
+        'faceId': faceId,
+        'node': node.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add node to tracked face: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a node from a tracked face
+  Future<void> removeNodeFromTrackedFace({
+    required String nodeId,
+    required String faceId,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeNodeFromTrackedFace({
+        'nodeId': nodeId,
+        'faceId': faceId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to remove node from tracked face: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Get face landmarks for a specific face
+  Future<List<FaceLandmark>> getFaceLandmarks(String faceId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getFaceLandmarks(faceId);
+      return result.map((e) => FaceLandmark.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get face landmarks: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Set face tracking configuration
+  Future<void> setFaceTrackingConfig({
+    bool detectLandmarks = true,
+    bool detectExpressions = true,
+    double minFaceSize = 0.1,
+    double maxFaceSize = 1.0,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setFaceTrackingConfig({
+        'detectLandmarks': detectLandmarks,
+        'detectExpressions': detectExpressions,
+        'minFaceSize': minFaceSize,
+        'maxFaceSize': maxFaceSize,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set face tracking config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  // ===== Cloud Anchor Methods =====
+
+  /// Create a cloud anchor from a local anchor
+  Future<String> createCloudAnchor(String localAnchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.createCloudAnchor(localAnchorId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to create cloud anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Resolve a cloud anchor by its ID
+  Future<void> resolveCloudAnchor(String cloudAnchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.resolveCloudAnchor(cloudAnchorId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to resolve cloud anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all cloud anchors
+  Future<List<ARCloudAnchor>> getCloudAnchors() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getCloudAnchors();
+      return result.map((e) => ARCloudAnchor.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get cloud anchors: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get a specific cloud anchor by ID
+  Future<ARCloudAnchor?> getCloudAnchor(String cloudAnchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getCloudAnchor(cloudAnchorId);
+      if (result == null) return null;
+      return ARCloudAnchor.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get cloud anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Delete a cloud anchor
+  Future<void> deleteCloudAnchor(String cloudAnchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.deleteCloudAnchor(cloudAnchorId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to delete cloud anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Check if cloud anchors are supported.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isCloudAnchorsSupported() => _safeSupportCheck(
+    'isCloudAnchorsSupported',
+    _backend.isCloudAnchorsSupported,
+  );
+
+  /// Set cloud anchor configuration
+  Future<void> setCloudAnchorConfig({
+    int maxCloudAnchors = 10,
+    Duration timeout = const Duration(seconds: 30),
+    bool enableSharing = true,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setCloudAnchorConfig({
+        'maxCloudAnchors': maxCloudAnchors,
+        'timeoutMs': timeout.inMilliseconds,
+        'enableSharing': enableSharing,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set cloud anchor config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Share a cloud anchor with other users
+  Future<String> shareCloudAnchor(String cloudAnchorId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.shareCloudAnchor(cloudAnchorId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to share cloud anchor: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Join a shared cloud anchor session
+  Future<void> joinCloudAnchorSession(String sessionId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.joinCloudAnchorSession(sessionId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to join cloud anchor session: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Leave the current cloud anchor session
+  Future<void> leaveCloudAnchorSession() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.leaveCloudAnchorSession();
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to leave cloud anchor session: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  // ===== Occlusion Methods =====
+
+  /// Enable or disable occlusion
+  Future<void> setOcclusionEnabled(bool enabled) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setOcclusionEnabled(enabled);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set occlusion enabled: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Check if occlusion is enabled
+  Future<bool> isOcclusionEnabled() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.isOcclusionEnabled();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to check occlusion enabled: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set occlusion configuration
+  Future<void> setOcclusionConfig({
+    required OcclusionType type,
+    double confidence = 0.7,
+    bool enablePersonOcclusion = true,
+    bool enablePlaneOcclusion = true,
+    bool enableDepthOcclusion = true,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setOcclusionConfig({
+        'type': type.name,
+        'confidence': confidence,
+        'enablePersonOcclusion': enablePersonOcclusion,
+        'enablePlaneOcclusion': enablePlaneOcclusion,
+        'enableDepthOcclusion': enableDepthOcclusion,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set occlusion config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all active occlusions
+  Future<List<AROcclusion>> getOcclusions() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getOcclusions();
+      return result
+          .map((e) => AROcclusion.fromMap(e))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get occlusions: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get a specific occlusion by ID
+  Future<AROcclusion?> getOcclusion(String occlusionId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getOcclusion(occlusionId);
+      if (result == null) return null;
+      return AROcclusion.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get occlusion: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Create a new occlusion
+  Future<String> createOcclusion({
+    required OcclusionType type,
+    required Vector3 position,
+    required Quaternion rotation,
+    required Vector3 scale,
+    Map<String, dynamic>? metadata,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.createOcclusion({
+        'type': type.name,
+        'position': position.toMap(),
+        'rotation': rotation.toMap(),
+        'scale': scale.toMap(),
+        'metadata': metadata ?? {},
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to create occlusion: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update an existing occlusion
+  Future<void> updateOcclusion({
+    required String occlusionId,
+    Vector3? position,
+    Quaternion? rotation,
+    Vector3? scale,
+    Map<String, dynamic>? metadata,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateOcclusion({
+        'occlusionId': occlusionId,
+        if (position != null) 'position': position.toMap(),
+        if (rotation != null) 'rotation': rotation.toMap(),
+        if (scale != null) 'scale': scale.toMap(),
+        if (metadata != null) 'metadata': metadata,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update occlusion: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove an occlusion
+  Future<void> removeOcclusion(String occlusionId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeOcclusion(occlusionId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove occlusion: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Check if occlusion is supported on the current device.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isOcclusionSupported() => _safeSupportCheck(
+    'isOcclusionSupported',
+    () async {
+      final result = await _backend.invokeMethod('isOcclusionSupported');
+      return result is bool ? result : false;
+    },
+  );
+
+  /// Get occlusion capabilities
+  Future<Map<String, dynamic>> getOcclusionCapabilities() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod('getOcclusionCapabilities');
+      return Map<String, dynamic>.from(result as Map);
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to get occlusion capabilities: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  // ===== Physics Methods =====
+  /// Check if physics simulation is supported.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isPhysicsSupported() => _safeSupportCheck(
+    'isPhysicsSupported',
+    () async {
+      final result = await _backend.invokeMethod('isPhysicsSupported');
+      return result is bool ? result : false;
+    },
+  );
+
+  /// Initialize physics world with configuration
+  Future<void> initializePhysics(PhysicsWorldConfig config) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('initializePhysics', config.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to initialize physics: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Start physics simulation
+  Future<void> startPhysics() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('startPhysics');
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to start physics: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Stop physics simulation
+  Future<void> stopPhysics() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('stopPhysics');
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to stop physics: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Pause physics simulation
+  Future<void> pausePhysics() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('pausePhysics');
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to pause physics: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Resume physics simulation
+  Future<void> resumePhysics() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('resumePhysics');
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to resume physics: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Create a physics body for a node
+  Future<String> createPhysicsBody({
+    required String nodeId,
+    required PhysicsBodyType type,
+    required PhysicsMaterial material,
+    Vector3? position,
+    Quaternion? rotation,
+    Vector3? scale,
+    double? mass,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.addPhysicsBody({
+        'nodeId': nodeId,
+        'type': type.name,
+        'material': material.toMap(),
+        if (position != null) 'position': position.toMap(),
+        if (rotation != null) 'rotation': rotation.toMap(),
+        if (scale != null) 'scale': scale.toMap(),
+        if (mass != null) 'mass': mass,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to create physics body: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a physics body
+  Future<void> removePhysicsBody(String bodyId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removePhysicsBody(bodyId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove physics body: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Apply force to a physics body
+  Future<void> applyForce({
+    required String bodyId,
+    required Vector3 force,
+    Vector3? point,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.applyForce({
+        'bodyId': bodyId,
+        'force': force.toMap(),
+        if (point != null) 'point': point.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to apply force: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Apply impulse to a physics body
+  Future<void> applyImpulse({
+    required String bodyId,
+    required Vector3 impulse,
+    Vector3? point,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.applyImpulse({
+        'bodyId': bodyId,
+        'impulse': impulse.toMap(),
+        if (point != null) 'point': point.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to apply impulse: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set velocity of a physics body
+  Future<void> setVelocity({
+    required String bodyId,
+    required Vector3 velocity,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setVelocity', {
+        'bodyId': bodyId,
+        'velocity': velocity.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set velocity: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set angular velocity of a physics body
+  Future<void> setAngularVelocity({
+    required String bodyId,
+    required Vector3 angularVelocity,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setAngularVelocity', {
+        'bodyId': bodyId,
+        'angularVelocity': angularVelocity.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set angular velocity: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Create a physics constraint between two bodies
+  Future<String> createPhysicsConstraint({
+    required String bodyAId,
+    required String bodyBId,
+    required PhysicsConstraintType type,
+    Vector3? anchorA,
+    Vector3? anchorB,
+    Vector3? axisA,
+    Vector3? axisB,
+    double? lowerLimit,
+    double? upperLimit,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.addPhysicsConstraint({
+        'bodyAId': bodyAId,
+        'bodyBId': bodyBId,
+        'type': type.name,
+        if (anchorA != null) 'anchorA': anchorA.toMap(),
+        if (anchorB != null) 'anchorB': anchorB.toMap(),
+        if (axisA != null) 'axisA': axisA.toMap(),
+        if (axisB != null) 'axisB': axisB.toMap(),
+        if (lowerLimit != null) 'lowerLimit': lowerLimit,
+        if (upperLimit != null) 'upperLimit': upperLimit,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to create physics constraint: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a physics constraint
+  Future<void> removePhysicsConstraint(String constraintId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removePhysicsConstraint(constraintId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove physics constraint: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all physics bodies
+  Future<List<ARPhysicsBody>> getPhysicsBodies() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getPhysicsBodies();
+      return result
+          .map((e) => ARPhysicsBody.fromMap(e))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get physics bodies: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all physics constraints
+  Future<List<PhysicsConstraint>> getPhysicsConstraints() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getPhysicsConstraints();
+      return result
+          .map((e) => PhysicsConstraint.fromMap(e))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get physics constraints: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get physics world configuration
+  Future<PhysicsWorldConfig> getPhysicsWorldConfig() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod('getPhysicsWorldConfig');
+      return PhysicsWorldConfig.fromMap(
+        Map<String, dynamic>.from(result as Map),
+      );
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get physics world config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update physics world configuration
+  Future<void> updatePhysicsWorldConfig(PhysicsWorldConfig config) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updatePhysicsWorldConfig', config.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update physics world config: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  // ===== Multi-User Methods =====
+
+  /// Check if multi-user AR is supported.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isMultiUserSupported() => _safeSupportCheck(
+    'isMultiUserSupported',
+    () async {
+      final result = await _backend.invokeMethod('isMultiUserSupported');
+      return result is bool ? result : false;
+    },
+  );
+
+  /// Create a new multi-user session
+  Future<String> createMultiUserSession({
+    required String name,
+    int maxParticipants = 8,
+    bool isPrivate = false,
+    String? password,
+    List<MultiUserCapability> capabilities = const [
+      MultiUserCapability.spatialSharing,
+      MultiUserCapability.objectSynchronization,
+      MultiUserCapability.realTimeCollaboration,
+    ],
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod('createMultiUserSession', {
+        'name': name,
+        'maxParticipants': maxParticipants,
+        'isPrivate': isPrivate,
+        'password': password,
+        'capabilities': capabilities.map((c) => c.name).toList(),
+      });
+      return result as String;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to create multi-user session: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Join an existing multi-user session
+  Future<void> joinMultiUserSession({
+    required String sessionId,
+    String? password,
+    String displayName = 'User',
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.joinMultiUserSession(sessionId, displayName: displayName, password: password);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to join multi-user session: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Leave the current multi-user session
+  Future<void> leaveMultiUserSession() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.leaveMultiUserSession();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to leave multi-user session: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get current multi-user session
+  Future<ARMultiUserSession?> getMultiUserSession() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getMultiUserSession();
+      if (result == null) return null;
+      return ARMultiUserSession.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get multi-user session: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all participants in the current session
+  Future<List<MultiUserParticipant>> getMultiUserParticipants() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getMultiUserParticipants();
+      return result
+          .map((e) => MultiUserParticipant.fromMap(e))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to get multi-user participants: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Share an object with other participants
+  Future<String> shareObject({
+    required String nodeId,
+    bool isLocked = false,
+    bool isVisible = true,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod('shareObject', {
+        'nodeId': nodeId,
+        'isLocked': isLocked,
+        'isVisible': isVisible,
+      });
+      return result as String;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to share object: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Unshare an object (remove from shared objects)
+  Future<void> unshareObject(String sharedObjectId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.unshareObject(sharedObjectId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to unshare object: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update a shared object's properties
+  Future<void> updateSharedObject({
+    required String sharedObjectId,
+    Vector3? position,
+    Quaternion? rotation,
+    Vector3? scale,
+    bool? isLocked,
+    bool? isVisible,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateSharedObject', {
+        'sharedObjectId': sharedObjectId,
+        'position': position?.toMap(),
+        'rotation': rotation?.toMap(),
+        'scale': scale?.toMap(),
+        'isLocked': isLocked,
+        'isVisible': isVisible,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update shared object: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all shared objects in the current session
+  Future<List<MultiUserSharedObject>> getMultiUserSharedObjects() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getSharedObjects();
+      return result
+          .map((e) => MultiUserSharedObject.fromMap(e))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to get multi-user shared objects: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Set participant role
+  Future<void> setParticipantRole({
+    required String participantId,
+    required MultiUserRole role,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setParticipantRole', {
+        'participantId': participantId,
+        'role': role.name,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set participant role: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Kick a participant from the session
+  Future<void> kickParticipant(String participantId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('kickParticipant', {
+        'participantId': participantId,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to kick participant: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update participant display name
+  Future<void> updateParticipantDisplayName({
+    required String participantId,
+    required String displayName,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateParticipantDisplayName', {
+        'participantId': participantId,
+        'displayName': displayName,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update participant display name: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  // ===== LIGHTING METHODS =====
+
+  /// Check if lighting and shadows are supported.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isLightingSupported() => _safeSupportCheck(
+    'isLightingSupported',
+    () async {
+      final result = await _backend.invokeMethod('isLightingSupported');
+      return result is bool ? result : false;
+    },
+  );
+
+  /// Get lighting capabilities
+  Future<Map<String, dynamic>> getLightingCapabilities() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod('getLightingCapabilities');
+      return Map<String, dynamic>.from(result as Map);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get lighting capabilities: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Add a light to the scene
+  Future<ARLight> addLight(ARLight light) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.addLight(light.toMap());
+      // Backend may return a map or a string ID
+      if (result is Map) {
+        return ARLight.fromMap(Map<String, dynamic>.from(result));
+      }
+      final lightMap = light.toMap();
+      lightMap['id'] = result;
+      return ARLight.fromMap(lightMap);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add light: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a light from the scene
+  Future<void> removeLight(String lightId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeLight(lightId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove light: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update an existing light
+  Future<ARLight> updateLight(ARLight light) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateLight(light.toMap());
+      return light;
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update light: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all lights in the scene
+  Future<List<ARLight>> getLights() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getLights();
+      return result
+          .map((light) => ARLight.fromMap(light))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get lights: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get a specific light by ID
+  Future<ARLight?> getLight(String lightId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getLight(lightId);
+      if (result == null) return null;
+      return ARLight.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get light: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set global lighting configuration
+  Future<void> setLightingConfig(ARLightingConfig config) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setLightingConfig(config.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set lighting config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get current lighting configuration
+  Future<ARLightingConfig> getLightingConfig() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getLightingConfig();
+      if (result == null) throw PlatformException(code: 'NOT_FOUND', message: 'No lighting config');
+      return ARLightingConfig.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get lighting config: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Enable or disable shadows
+  Future<void> setShadowsEnabled(bool enabled) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setShadowsEnabled', {'enabled': enabled});
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set shadows enabled: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set shadow quality
+  Future<void> setShadowQuality(ShadowQuality quality) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setShadowQuality', {
+        'quality': quality.name,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set shadow quality: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Set ambient lighting
+  Future<void> setAmbientLighting({
+    required double intensity,
+    required Vector3 color,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setAmbientLighting', {
+        'intensity': intensity,
+        'color': color.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set ambient lighting: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update light position
+  Future<void> updateLightPosition({
+    required String lightId,
+    required Vector3 position,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateLightPosition', {
+        'lightId': lightId,
+        'position': position.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update light position: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update light rotation
+  Future<void> updateLightRotation({
+    required String lightId,
+    required Quaternion rotation,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateLightRotation', {
+        'lightId': lightId,
+        'rotation': rotation.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update light rotation: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update light intensity
+  Future<void> updateLightIntensity({
+    required String lightId,
+    required double intensity,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateLightIntensity', {
+        'lightId': lightId,
+        'intensity': intensity,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update light intensity: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Update light color
+  Future<void> updateLightColor({
+    required String lightId,
+    required Vector3 color,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateLightColor', {
+        'lightId': lightId,
+        'color': color.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to update light color: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Enable or disable a light
+  Future<void> setLightEnabled({
+    required String lightId,
+    required bool enabled,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setLightEnabled', {
+        'lightId': lightId,
+        'enabled': enabled,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set light enabled: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Enable or disable shadows for a specific light
+  Future<void> setLightCastShadows({
+    required String lightId,
+    required bool castShadows,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setLightCastShadows', {
+        'lightId': lightId,
+        'castShadows': castShadows,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set light cast shadows: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Clear all lights from the scene
+  Future<void> clearLights() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('clearLights');
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to clear lights: ${e.message}');
+      rethrow;
+    }
+  }
+
+  // Environmental Probes Methods
+
+  /// Check if environmental probes are supported.
+  ///
+  /// Never throws — returns `false` if the controller is disposed, the
+  /// native method is missing, or the platform reports an error.
+  Future<bool> isEnvironmentalProbesSupported() => _safeSupportCheck(
+    'isEnvironmentalProbesSupported',
+    () async {
+      final result = await _backend.invokeMethod(
+        'isEnvironmentalProbesSupported',
+      );
+      return result is bool ? result : false;
+    },
+  );
+
+  /// Get environmental probes capabilities
+  Future<Map<String, dynamic>> getEnvironmentalProbesCapabilities() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.invokeMethod(
+        'getEnvironmentalProbesCapabilities',
+      );
+      return Map<String, dynamic>.from(result as Map);
+    } on MissingPluginException {
+      // Native side doesn't implement this handler (e.g. older build or
+      // unsupported platform) — degrade gracefully instead of throwing.
+      return {};
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to get environmental probes capabilities: ${e.message}',
+      );
+      return {};
+    }
+  }
+
+  /// Add environmental probe
+  Future<AREnvironmentalProbe> addEnvironmentalProbe(
+    AREnvironmentalProbe probe,
+  ) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.addEnvironmentalProbe(probe.toMap());
+      if (result is Map) {
+        return AREnvironmentalProbe.fromMap(Map<String, dynamic>.from(result));
+      }
+      final probeMap = probe.toMap();
+      probeMap['id'] = result;
+      return AREnvironmentalProbe.fromMap(probeMap);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add environmental probe: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove environmental probe
+  Future<void> removeEnvironmentalProbe(String probeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeEnvironmentalProbe(probeId);
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to remove environmental probe: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe
+  Future<AREnvironmentalProbe> updateEnvironmentalProbe(
+    AREnvironmentalProbe probe,
+  ) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.updateEnvironmentalProbe(probe.toMap());
+      return probe;
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Get all environmental probes
+  Future<List<AREnvironmentalProbe>> getEnvironmentalProbes() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getEnvironmentalProbes();
+      return result
+          .map((probe) => AREnvironmentalProbe.fromMap(probe))
+          .toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get environmental probes: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Get specific environmental probe
+  Future<AREnvironmentalProbe?> getEnvironmentalProbe(String probeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getEnvironmentalProbe(probeId);
+      if (result == null) return null;
+      return AREnvironmentalProbe.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get environmental probe: ${e.message}');
+      return null;
+    }
+  }
+
+  /// Set environmental probe configuration
+  Future<void> setEnvironmentalProbeConfig(
+    AREnvironmentalProbeConfig config,
+  ) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setEnvironmentalProbeConfig(config.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to set environmental probe config: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Get environmental probe configuration
+  Future<AREnvironmentalProbeConfig> getEnvironmentalProbeConfig() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getEnvironmentalProbeConfig();
+      if (result == null) throw PlatformException(code: 'NOT_FOUND', message: 'No probe config');
+      return AREnvironmentalProbeConfig.fromMap(result);
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to get environmental probe config: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe position
+  Future<void> updateEnvironmentalProbePosition({
+    required String probeId,
+    required Vector3 position,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateEnvironmentalProbePosition', {
+        'probeId': probeId,
+        'position': position.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe position: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe rotation
+  Future<void> updateEnvironmentalProbeRotation({
+    required String probeId,
+    required Quaternion rotation,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateEnvironmentalProbeRotation', {
+        'probeId': probeId,
+        'rotation': rotation.toMap(),
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe rotation: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe influence radius
+  Future<void> updateEnvironmentalProbeInfluenceRadius({
+    required String probeId,
+    required double influenceRadius,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateEnvironmentalProbeInfluenceRadius', {
+        'probeId': probeId,
+        'influenceRadius': influenceRadius,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe influence radius: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe quality
+  Future<void> updateEnvironmentalProbeQuality({
+    required String probeId,
+    required ARProbeQuality quality,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateEnvironmentalProbeQuality', {
+        'probeId': probeId,
+        'quality': quality.name,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe quality: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Enable/disable environmental probe
+  Future<void> setEnvironmentalProbeEnabled({
+    required String probeId,
+    required bool enabled,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('setEnvironmentalProbeEnabled', {
+        'probeId': probeId,
+        'enabled': enabled,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to set environmental probe enabled: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update environmental probe capture settings
+  Future<void> updateEnvironmentalProbeCaptureSettings({
+    required String probeId,
+    required bool captureReflections,
+    required bool captureLighting,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.invokeMethod('updateEnvironmentalProbeCaptureSettings', {
+        'probeId': probeId,
+        'captureReflections': captureReflections,
+        'captureLighting': captureLighting,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to update environmental probe capture settings: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Force environmental probe update
+  Future<void> forceEnvironmentalProbeUpdate(String probeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.forceEnvironmentalProbeUpdate(probeId);
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to force environmental probe update: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Clear all environmental probes
+  Future<void> clearEnvironmentalProbes() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.clearEnvironmentalProbes();
+    } on PlatformException catch (e) {
+      _errorController.add(
+        'Failed to clear environmental probes: ${e.message}',
+      );
+      rethrow;
+    }
+  }
+
+  /// Dispose the controller
+  void dispose() {
+    if (_isDisposed) return;
+    _isDisposed = true;
+    _planesController.close();
+    _anchorsController.close();
+    _errorController.close();
+    _animationStatusController.close();
+    _transitionStatusController.close();
+    _stateMachineStatusController.close();
+    _imageTargetsController.close();
+    _trackedImagesController.close();
+    _facesController.close();
+    _cloudAnchorsController.close();
+    _cloudAnchorStatusController.close();
+    _occlusionsController.close();
+    _occlusionStatusController.close();
+    _physicsBodiesController.close();
+    _physicsConstraintsController.close();
+    _physicsStatusController.close();
+    _multiUserSessionController.close();
+    _multiUserParticipantsController.close();
+    _multiUserSharedObjectsController.close();
+    _multiUserSessionStatusController.close();
+    _lightsController.close();
+    _lightingConfigController.close();
+    _lightingStatusController.close();
+    _probesController.close();
+    _probeConfigController.close();
+    _probeStatusController.close();
+    _markerTargetsController.close();
+    _trackedMarkersController.close();
+    _backend.dispose();
+  }
+
+  // ===== MARKER TRACKING METHODS =====
+
+  /// Add a marker target for tracking
+  Future<void> addMarkerTarget(ARMarkerTarget target) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.addMarkerTarget(target.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add marker target: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a marker target
+  Future<void> removeMarkerTarget(String targetId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeMarkerTarget(targetId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove marker target: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Get all registered marker targets
+  Future<List<ARMarkerTarget>> getMarkerTargets() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getMarkerTargets();
+      return result.map((e) => ARMarkerTarget.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get marker targets: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Enable or disable marker tracking
+  Future<void> setMarkerTrackingEnabled(bool enabled) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setMarkerTrackingEnabled(enabled);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set marker tracking: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Check if marker tracking is enabled
+  Future<bool> isMarkerTrackingEnabled() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      return await _backend.isMarkerTrackingEnabled();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to check marker tracking status: ${e.message}');
+      return false;
+    }
+  }
+
+  /// Get currently tracked markers
+  Future<List<ARTrackedMarker>> getTrackedMarkers() async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final result = await _backend.getTrackedMarkers();
+      return result.map((e) => ARTrackedMarker.fromMap(e)).toList();
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to get tracked markers: ${e.message}');
+      return [];
+    }
+  }
+
+  /// Set marker detection options
+  Future<void> setMarkerDetectionOptions(ARMarkerDetectionOptions options) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.setMarkerDetectionOptions(options.toMap());
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to set marker detection options: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Add a node anchored to a tracked marker
+  Future<void> addNodeToTrackedMarker({
+    required String nodeId,
+    required String trackedMarkerId,
+    required ARNode node,
+  }) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      final nodeData = node.toMap();
+      nodeData['trackedMarkerId'] = trackedMarkerId;
+
+      if (node.type == NodeType.model &&
+          node.modelPath != null &&
+          !node.modelPath!.startsWith('http')) {
+        final modelBytes = await _loadAsset(node.modelPath!);
+        nodeData['modelData'] = modelBytes;
+      }
+
+      await _backend.addNodeToTrackedMarker({
+        'nodeId': nodeId,
+        'nodeData': nodeData,
+      });
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to add node to tracked marker: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Remove a node from a tracked marker
+  Future<void> removeNodeFromTrackedMarker(String nodeId) async {
+    if (_isDisposed) throw StateError('Controller is disposed');
+    try {
+      await _backend.removeNodeFromTrackedMarker(nodeId);
+    } on PlatformException catch (e) {
+      _errorController.add('Failed to remove node from tracked marker: ${e.message}');
+      rethrow;
+    }
+  }
+}

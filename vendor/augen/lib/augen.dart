@@ -1,0 +1,30 @@
+/// Augen - Flutter AR plugin for ARCore (Android) and RealityKit (iOS)
+library;
+
+export 'src/augen_controller.dart';
+export 'src/augen_view.dart';
+export 'src/models/ar_anchor.dart';
+export 'src/models/ar_node.dart' show ARNode, NodeType, ModelFormat;
+export 'src/models/ar_plane.dart';
+export 'src/models/ar_hit_result.dart';
+export 'src/models/ar_session_config.dart';
+export 'src/models/ar_animation.dart';
+export 'src/models/animation_blend.dart';
+export 'src/models/animation_transition.dart';
+export 'src/models/animation_state_machine.dart' hide AnimationState;
+export 'src/models/animation_blend_tree.dart';
+export 'src/models/ar_image_target.dart';
+export 'src/models/ar_tracked_image.dart';
+export 'src/models/ar_face.dart';
+export 'src/models/ar_cloud_anchor.dart';
+export 'src/models/ar_occlusion.dart';
+export 'src/models/ar_physics.dart';
+export 'src/models/ar_multi_user.dart';
+export 'src/models/ar_lighting.dart';
+export 'src/models/ar_environmental_probes.dart';
+export 'src/models/vector3.dart';
+export 'src/models/quaternion.dart';
+export 'src/models/vector2.dart';
+export 'src/models/ar_marker_target.dart';
+export 'src/models/ar_tracked_marker.dart';
+export 'src/models/ar_marker_config.dart';
