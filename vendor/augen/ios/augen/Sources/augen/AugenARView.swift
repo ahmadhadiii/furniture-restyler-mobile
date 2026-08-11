@@ -239,38 +239,60 @@ class AugenARView: NSObject, FlutterPlatformView {
     }
     
     private func addNode(arguments: [String: Any], result: @escaping FlutterResult) {
-        guard let nodeId = arguments["id"] as? String,
-              let type = arguments["type"] as? String,
+        guard let nodeId = arguments["id"] as? String else {
+            result(FlutterError(code: "INVALID_ARGUMENTS", message: "Missing id parameter", details: nil))
+            return
+        }
+        switch buildAnchor(arguments: arguments) {
+        case .failure(let error):
+            result(error)
+        case .success(let anchor):
+            arView.scene.addAnchor(anchor)
+            nodes[nodeId] = anchor
+            result(nil)
+        }
+    }
+
+    /// Parses the common node arguments and builds a fully-configured
+    /// AnchorEntity, but does NOT touch `arView.scene` or `nodes` - callers
+    /// (addNode/updateNode) decide when to make it live. This is what lets
+    /// updateNode swap a placed item atomically: the old anchor is only
+    /// removed once a replacement has been confirmed built successfully,
+    /// instead of the previous remove-then-add sequence which deleted the
+    /// old node from the scene even when the new one failed to load,
+    /// leaving that slot silently empty while Dart's own state still
+    /// believed the old item was placed.
+    private func buildAnchor(arguments: [String: Any]) -> Result<AnchorEntity, FlutterError> {
+        guard let type = arguments["type"] as? String,
               let positionData = arguments["position"] as? [String: Any],
               let rotationData = arguments["rotation"] as? [String: Any],
               let scaleData = arguments["scale"] as? [String: Any] else {
-            result(FlutterError(
+            return .failure(FlutterError(
                 code: "INVALID_ARGUMENTS",
                 message: "Missing required node parameters",
                 details: nil
             ))
-            return
         }
-        
+
         let position = SIMD3<Float>(
             x: (positionData["x"] as? NSNumber)?.floatValue ?? 0,
             y: (positionData["y"] as? NSNumber)?.floatValue ?? 0,
             z: (positionData["z"] as? NSNumber)?.floatValue ?? 0
         )
-        
+
         let rotation = simd_quatf(
             ix: (rotationData["x"] as? NSNumber)?.floatValue ?? 0,
             iy: (rotationData["y"] as? NSNumber)?.floatValue ?? 0,
             iz: (rotationData["z"] as? NSNumber)?.floatValue ?? 0,
             r: (rotationData["w"] as? NSNumber)?.floatValue ?? 1
         )
-        
+
         let scale = SIMD3<Float>(
             x: (scaleData["x"] as? NSNumber)?.floatValue ?? 1,
             y: (scaleData["y"] as? NSNumber)?.floatValue ?? 1,
             z: (scaleData["z"] as? NSNumber)?.floatValue ?? 1
         )
-        
+
         let anchor = AnchorEntity(world: position)
 
         // Handle custom 3D model loading
@@ -288,19 +310,12 @@ class AugenARView: NSObject, FlutterPlatformView {
                     imageData: imageBytesData,
                     widthMeters: widthMeters,
                     heightMeters: heightMeters,
-                    rotation: rotation,
+                    objectPosition: position,
                     anchor: anchor
                 ) {
-                    // Anchor was never added to the scene or `nodes` - it's
-                    // just a local, unreferenced object that ARC deallocates
-                    // here, not a leak.
-                    result(error)
-                    return
+                    return .failure(error)
                 }
-                arView.scene.addAnchor(anchor)
-                nodes[nodeId] = anchor
-                result(nil)
-                return
+                return .success(anchor)
             }
 
             let modelPath = arguments["modelPath"] as? String
@@ -313,20 +328,15 @@ class AugenARView: NSObject, FlutterPlatformView {
                 modelFormat: modelFormat,
                 scale: scale,
                 rotation: rotation,
-                anchor: anchor,
-                result: result
+                anchor: anchor
             )
-
-            arView.scene.addAnchor(anchor)
-            nodes[nodeId] = anchor
-            result(nil)
-            return
+            return .success(anchor)
         }
-        
+
         // Create mesh based on type for primitive shapes
         let mesh: MeshResource
         let material = SimpleMaterial(color: .blue, isMetallic: false)
-        
+
         switch type.lowercased() {
         case "sphere":
             mesh = MeshResource.generateSphere(radius: 0.1)
@@ -341,26 +351,22 @@ class AugenARView: NSObject, FlutterPlatformView {
         default:
             mesh = MeshResource.generateSphere(radius: 0.1)
         }
-        
+
         let modelEntity = ModelEntity(mesh: mesh, materials: [material])
         modelEntity.scale = scale
         modelEntity.orientation = rotation
-        
+
         anchor.addChild(modelEntity)
-        arView.scene.addAnchor(anchor)
-        nodes[nodeId] = anchor
-        
-        result(nil)
+        return .success(anchor)
     }
-    
+
     private func loadCustomModel(
         modelPath: String?,
         modelData: Data?,
         modelFormat: String?,
         scale: SIMD3<Float>,
         rotation: simd_quatf,
-        anchor: AnchorEntity,
-        result: @escaping FlutterResult
+        anchor: AnchorEntity
     ) {
         // Load custom 3D model (USDZ, Reality, or other formats)
         // RealityKit natively supports USDZ and Reality file formats
@@ -413,20 +419,14 @@ class AugenARView: NSObject, FlutterPlatformView {
     /// half its height here to stand on the floor at that point instead of
     /// floating with its center there.
     /// Returns nil on success, or the FlutterError to report on failure - does
-    /// NOT call `result` itself, so the caller (addNode) is the single place
-    /// that both reports the outcome AND decides whether to register the
-    /// anchor into `arView.scene`/`nodes`. Previously this called `result`
-    /// internally while addNode unconditionally added the anchor regardless
-    /// of success/failure - on a decode/texture error, that left an empty,
-    /// invisible anchor permanently registered in both the scene and the
-    /// `nodes` map even though Dart had already seen the operation fail,
-    /// leaking an anchor per failed attempt and letting `nodes` claim a node
-    /// exists that the Dart side believes was never created.
+    /// NOT call `result` itself, so the caller (buildAnchor) is the single
+    /// place that decides whether to register the anchor into
+    /// `arView.scene`/`nodes`.
     private func loadTexturedPlane(
         imageData: Data,
         widthMeters: Float,
         heightMeters: Float,
-        rotation: simd_quatf,
+        objectPosition: SIMD3<Float>,
         anchor: AnchorEntity
     ) -> FlutterError? {
         guard let uiImage = UIImage(data: imageData), let cgImage = uiImage.cgImage else {
@@ -444,7 +444,7 @@ class AugenARView: NSObject, FlutterPlatformView {
 
             let mesh = MeshResource.generatePlane(width: widthMeters, height: heightMeters)
             let modelEntity = ModelEntity(mesh: mesh, materials: [material])
-            modelEntity.orientation = rotation
+            modelEntity.orientation = billboardRotation(objectPosition: objectPosition)
             modelEntity.position = SIMD3<Float>(0, heightMeters / 2, 0)
 
             anchor.addChild(modelEntity)
@@ -458,6 +458,27 @@ class AugenARView: NSObject, FlutterPlatformView {
         }
     }
 
+    /// generatePlane's mesh normal points along local +Z. The node used to
+    /// get zero rotation applied (the Dart side never set one - it only
+    /// used the hit-test position, not its rotation), which meant every
+    /// placed item faced the same fixed, arbitrary world direction no
+    /// matter where the user was standing when they tapped to place it -
+    /// RealityKit back-face-culls by default, so from most angles the
+    /// "placed" item was simply invisible or edge-on. Rotates the plane, at
+    /// placement time, to face the camera's position instead - a yaw-only
+    /// turn (the Y component of the direction is zeroed) so the plane
+    /// stays upright rather than tilting to match the camera's height
+    /// above/below the floor hit point.
+    private func billboardRotation(objectPosition: SIMD3<Float>) -> simd_quatf {
+        let cameraPosition = arView.cameraTransform.translation
+        var toCamera = cameraPosition - objectPosition
+        toCamera.y = 0
+        guard simd_length(toCamera) > 0.0001 else {
+            return simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        }
+        let direction = simd_normalize(toCamera)
+        return simd_quatf(from: SIMD3<Float>(0, 0, 1), to: direction)
+    }
 
     private func removeNode(arguments: [String: Any], result: @escaping FlutterResult) {
         guard let nodeId = arguments["nodeId"] as? String else {
@@ -491,17 +512,26 @@ class AugenARView: NSObject, FlutterPlatformView {
             ))
             return
         }
-        
-        if nodes[nodeId] != nil {
-            // Remove old node and add new one
-            removeNode(arguments: ["nodeId": nodeId], result: { _ in })
-            addNode(arguments: arguments, result: result)
-        } else {
+        guard let oldAnchor = nodes[nodeId] else {
             result(FlutterError(
                 code: "NODE_NOT_FOUND",
                 message: "Node with id \(nodeId) not found",
                 details: nil
             ))
+            return
+        }
+
+        switch buildAnchor(arguments: arguments) {
+        case .failure(let error):
+            // The replacement failed to build - `oldAnchor` is left exactly
+            // as it was in both `arView.scene` and `nodes` (see buildAnchor's
+            // own comment for why this matters).
+            result(error)
+        case .success(let newAnchor):
+            arView.scene.removeAnchor(oldAnchor)
+            arView.scene.addAnchor(newAnchor)
+            nodes[nodeId] = newAnchor
+            result(nil)
         }
     }
     

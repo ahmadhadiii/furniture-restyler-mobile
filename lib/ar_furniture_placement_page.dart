@@ -275,7 +275,20 @@ class _ArFurniturePlacementPageState extends State<ArFurniturePlacementPage> {
         if (_armed == armed) _armed = null;
       });
     } catch (error) {
-      _fail('Could not place object: $error');
+      // Deliberately NOT _fail() here: a failed download/decode for one
+      // product (e.g. a flaky network hiccup) used to end the whole AR
+      // session via the shared error screen, discarding every item already
+      // placed - anchors don't survive closing and reopening a session (see
+      // this class's own doc comment), so that was unrecoverable. The
+      // native side now leaves a previously-placed item untouched on a
+      // failed swap too (see AugenARView.swift's buildAnchor), so nothing
+      // here needs to reconcile `_placed` - it's already accurate either
+      // way. `_armed` is also left set so the user can just tap again to
+      // retry the same product without reopening the catalog.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not place "${armed.item.name}": $error')),
+      );
     } finally {
       if (mounted) {
         setState(() {
