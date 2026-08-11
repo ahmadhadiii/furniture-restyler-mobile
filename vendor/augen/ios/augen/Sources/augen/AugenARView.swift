@@ -4,6 +4,11 @@ import ARKit
 import RealityKit
 import Combine
 
+// FlutterError (from the Flutter iOS embedding) is a plain NSObject
+// subclass - it doesn't conform to Swift's Error protocol on its own, which
+// buildAnchor's `Result<AnchorEntity, FlutterError>` return type requires.
+extension FlutterError: Error {}
+
 class AugenARView: NSObject, FlutterPlatformView {
     private var arView: ARView
     private var methodChannel: FlutterMethodChannel
