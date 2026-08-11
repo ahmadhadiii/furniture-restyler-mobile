@@ -60,6 +60,12 @@ class ARNode {
   }) : assert(
          type != NodeType.model || modelPath != null || imageBytes != null,
          'modelPath or imageBytes is required when type is NodeType.model',
+       ),
+       assert(
+         imageBytes == null || (planeWidthMeters != null && planeHeightMeters != null),
+         'planeWidthMeters and planeHeightMeters are required when imageBytes is set - '
+         'the native textured-plane path silently falls back to a placeholder cube '
+         '(reporting success) if either is missing, which is very hard to catch without this.',
        );
 
   factory ARNode.fromMap(Map<dynamic, dynamic> map) {
@@ -162,6 +168,9 @@ class ARNode {
     String? modelPath,
     ModelFormat? modelFormat,
     List<ARAnimation>? animations,
+    Uint8List? imageBytes,
+    double? planeWidthMeters,
+    double? planeHeightMeters,
   }) {
     return ARNode(
       id: id ?? this.id,
@@ -173,6 +182,9 @@ class ARNode {
       modelPath: modelPath ?? this.modelPath,
       modelFormat: modelFormat ?? this.modelFormat,
       animations: animations ?? this.animations,
+      imageBytes: imageBytes ?? this.imageBytes,
+      planeWidthMeters: planeWidthMeters ?? this.planeWidthMeters,
+      planeHeightMeters: planeHeightMeters ?? this.planeHeightMeters,
     );
   }
 

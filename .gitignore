@@ -33,6 +33,15 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# vendor/augen is a vendored library package (see pubspec.yaml's
+# dependency_override) - its own build output and lockfile are regenerated
+# by running flutter test/pub get inside it and shouldn't be tracked, same
+# reasoning as the app's own /build/ above. A library's pubspec.lock isn't
+# meant to be committed either (only apps pin exact transitive versions).
+vendor/**/build/
+vendor/**/pubspec.lock
+vendor/**/.dart_tool/
+
 # Symbolication related
 app.*.symbols
 

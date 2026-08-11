@@ -284,16 +284,22 @@ class AugenARView: NSObject, FlutterPlatformView {
             if let imageBytesData = (arguments["imageBytes"] as? FlutterStandardTypedData)?.data,
                let widthMeters = (arguments["planeWidthMeters"] as? NSNumber)?.floatValue,
                let heightMeters = (arguments["planeHeightMeters"] as? NSNumber)?.floatValue {
-                loadTexturedPlane(
+                if let error = loadTexturedPlane(
                     imageData: imageBytesData,
                     widthMeters: widthMeters,
                     heightMeters: heightMeters,
                     rotation: rotation,
-                    anchor: anchor,
-                    result: result
-                )
+                    anchor: anchor
+                ) {
+                    // Anchor was never added to the scene or `nodes` - it's
+                    // just a local, unreferenced object that ARC deallocates
+                    // here, not a leak.
+                    result(error)
+                    return
+                }
                 arView.scene.addAnchor(anchor)
                 nodes[nodeId] = anchor
+                result(nil)
                 return
             }
 
@@ -406,21 +412,29 @@ class AugenARView: NSObject, FlutterPlatformView {
     /// ar_furniture_placement_page.dart - so the entity is offset upward by
     /// half its height here to stand on the floor at that point instead of
     /// floating with its center there.
+    /// Returns nil on success, or the FlutterError to report on failure - does
+    /// NOT call `result` itself, so the caller (addNode) is the single place
+    /// that both reports the outcome AND decides whether to register the
+    /// anchor into `arView.scene`/`nodes`. Previously this called `result`
+    /// internally while addNode unconditionally added the anchor regardless
+    /// of success/failure - on a decode/texture error, that left an empty,
+    /// invisible anchor permanently registered in both the scene and the
+    /// `nodes` map even though Dart had already seen the operation fail,
+    /// leaking an anchor per failed attempt and letting `nodes` claim a node
+    /// exists that the Dart side believes was never created.
     private func loadTexturedPlane(
         imageData: Data,
         widthMeters: Float,
         heightMeters: Float,
         rotation: simd_quatf,
-        anchor: AnchorEntity,
-        result: @escaping FlutterResult
-    ) {
+        anchor: AnchorEntity
+    ) -> FlutterError? {
         guard let uiImage = UIImage(data: imageData), let cgImage = uiImage.cgImage else {
-            result(FlutterError(
+            return FlutterError(
                 code: "INVALID_IMAGE",
                 message: "Could not decode imageBytes into an image",
                 details: nil
-            ))
-            return
+            )
         }
 
         do {
@@ -434,13 +448,13 @@ class AugenARView: NSObject, FlutterPlatformView {
             modelEntity.position = SIMD3<Float>(0, heightMeters / 2, 0)
 
             anchor.addChild(modelEntity)
-            result(nil)
+            return nil
         } catch {
-            result(FlutterError(
+            return FlutterError(
                 code: "TEXTURE_ERROR",
                 message: "Could not build texture from image: \(error)",
                 details: nil
-            ))
+            )
         }
     }
 

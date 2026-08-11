@@ -78,6 +78,13 @@ class _ArFurniturePlacementPageState extends State<ArFurniturePlacementPage> {
   // category updates that same node instead of adding a duplicate.
   final Map<String, FurnitureCatalogItem> _placed = {};
 
+  // Categories with an in-flight tap-to-place operation (hit-test + image
+  // download + addNode/updateNode) - guards _removePlaced from racing a
+  // removeNode call against that same node id while it's still being
+  // created/updated, which could otherwise leave the native scene and
+  // _placed out of sync with each other.
+  final Set<String> _busyCategoryKeys = {};
+
   @override
   void initState() {
     super.initState();
@@ -133,6 +140,12 @@ class _ArFurniturePlacementPageState extends State<ArFurniturePlacementPage> {
       }
       await controller.initialize(_sessionConfig);
       if (!mounted) return;
+      // onViewCreated can fire more than once on the same State (e.g.
+      // Android recreating the platform view's GL surface after the app is
+      // backgrounded/foregrounded) - cancel any previous subscriptions
+      // first so they don't leak for the rest of this page's lifetime.
+      await _errorSubscription?.cancel();
+      await _planesSubscription?.cancel();
       _errorSubscription = controller.errorStream.listen((error) {
         if (error.toString().toLowerCase().contains('node')) return;
         _fail('AR error: $error');
@@ -190,7 +203,10 @@ class _ArFurniturePlacementPageState extends State<ArFurniturePlacementPage> {
     final controller = _controller;
     final armed = _armed;
     if (controller == null || armed == null || _state != _ArState.ready || _placing) return;
-    setState(() => _placing = true);
+    setState(() {
+      _placing = true;
+      _busyCategoryKeys.add(armed.categoryKey);
+    });
     try {
       final results = await controller.hitTest(
         details.localPosition.dx,
@@ -251,16 +267,36 @@ class _ArFurniturePlacementPageState extends State<ArFurniturePlacementPage> {
       if (!mounted) return;
       setState(() {
         _placed[armed.categoryKey] = armed.item;
-        _armed = null;
+        // Only clear _armed if it's still the same request we started with -
+        // the user may have armed a DIFFERENT product/category while this
+        // one's hit-test+download was in flight (e.g. slow network), and
+        // blindly nulling it here would silently discard that newer
+        // selection with no error, forcing them to re-tap the catalog item.
+        if (_armed == armed) _armed = null;
       });
     } catch (error) {
       _fail('Could not place object: $error');
     } finally {
-      if (mounted) setState(() => _placing = false);
+      if (mounted) {
+        setState(() {
+          _placing = false;
+          _busyCategoryKeys.remove(armed.categoryKey);
+        });
+      }
     }
   }
 
   Future<void> _removePlaced(String categoryKey) async {
+    // Refuses to race a removeNode call against an in-flight
+    // addNode/updateNode for the same node id (see _busyCategoryKeys) - that
+    // race could otherwise leave a node in the AR scene with no chip to
+    // remove it, or a chip with nothing actually rendered.
+    if (_busyCategoryKeys.contains(categoryKey)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Still placing that item - try removing it again in a moment.')),
+      );
+      return;
+    }
     final nodeId = 'placed_$categoryKey';
     try {
       await _controller?.removeNode(nodeId);

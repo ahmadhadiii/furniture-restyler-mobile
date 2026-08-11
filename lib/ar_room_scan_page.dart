@@ -57,6 +57,13 @@ class _ArRoomScanPageState extends State<ArRoomScanPage> {
   StreamSubscription? _errorSubscription;
   StreamSubscription<List<ARPlane>>? _planesSubscription;
   Timer? _measureTimer;
+  // Reentrancy guard: the 300ms Timer.periodic below doesn't wait for the
+  // previous _sampleCenter's hit-test await to resolve before firing again.
+  // If a hit-test is ever slow enough to overlap the next tick, two
+  // in-flight calls could otherwise resolve out of order and update
+  // _stableDims/_stableCount/_currentPlaneId using a stale result after a
+  // newer one already updated the running average.
+  bool _sampling = false;
 
   _ArState _state = _ArState.requestingPermission;
   String? _errorMessage;
@@ -199,8 +206,9 @@ class _ArRoomScanPageState extends State<ArRoomScanPage> {
 
   Future<void> _sampleCenter() async {
     final controller = _controller;
-    if (controller == null || !mounted || _capturedWidth != null) return;
+    if (controller == null || !mounted || _capturedWidth != null || _sampling) return;
 
+    _sampling = true;
     final size = MediaQuery.of(context).size;
     try {
       final results = await controller.hitTest(size.width / 2, size.height / 2);
@@ -237,6 +245,28 @@ class _ArRoomScanPageState extends State<ArRoomScanPage> {
       final trackedPlane = plane;
       if (trackedPlane == null) return;
 
+      if (trackedPlane.type != PlaneType.vertical) {
+        // Both measurements this page captures are meant to come from a
+        // wall (vertical plane) - _resolveWallDims's axis-picking heuristic
+        // assumes one tangent axis is markedly more vertical than the
+        // other, which is meaningful for a wall but is just noise for a
+        // horizontal floor plane (both tangents are near-horizontal there).
+        // Without this check, the reticle drifting onto a detected floor
+        // for the ~5s hold window would silently capture bogus floor
+        // extents as if they were a wall's width/height.
+        _missedSamples++;
+        if (_missedSamples >= _missGraceSamples) {
+          setState(() {
+            _currentPlaneId = null;
+            _currentDims = null;
+            _stableCount = 0;
+            _stableDims.clear();
+          });
+          unawaited(_clearWallOutline());
+        }
+        return;
+      }
+
       final dims = _resolveWallDims(trackedPlane.extent, hit!.rotation);
 
       setState(() {
@@ -264,6 +294,8 @@ class _ArRoomScanPageState extends State<ArRoomScanPage> {
     } catch (_) {
       // Transient hit-test errors (e.g. tracking briefly lost) - ignore and
       // let the next sample try again rather than surfacing every blip.
+    } finally {
+      _sampling = false;
     }
   }
 

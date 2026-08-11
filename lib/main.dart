@@ -112,6 +112,10 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
   void dispose() {
     _roomLengthController.removeListener(_onRoomDimensionsChanged);
     _roomWidthController.removeListener(_onRoomDimensionsChanged);
+    _backendUrlController.dispose();
+    _roomLengthController.dispose();
+    _roomWidthController.dispose();
+    _roomHeightController.dispose();
     super.dispose();
   }
 
@@ -160,16 +164,23 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
   Future<void> _fetchCatalog() async {
     final backendUrl = _backendUrlController.text.trim();
     if (backendUrl.isEmpty) return;
+    // Captured so a response for a room type the user has since switched
+    // away from (e.g. tapping two chips quickly on a slow connection)
+    // can't overwrite the catalog for whatever's actually selected now -
+    // without this, whichever request happened to resolve LAST won
+    // regardless of which one was newer, which could silently show the
+    // wrong room type's products under the currently-selected chip.
+    final requestedRoomType = _selectedRoomType;
     setState(() => _catalogLoading = true);
     try {
       final response = await http
-          .get(Uri.parse('$backendUrl/furniture-catalog/$_selectedRoomType'))
+          .get(Uri.parse('$backendUrl/furniture-catalog/$requestedRoomType'))
           .timeout(const Duration(seconds: 15));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw Exception('Server returned ${response.statusCode}');
       }
       final decoded = jsonDecode(response.body) as List<dynamic>;
-      if (!mounted) return;
+      if (!mounted || requestedRoomType != _selectedRoomType) return;
       setState(() {
         _catalogItems = decoded.map((e) => FurnitureCatalogItem.fromJson(e as Map<String, dynamic>)).toList();
       });
@@ -177,10 +188,10 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
       // Catalog browsing is an enhancement, not required for the core
       // restyle flow - a failed fetch (offline, old backend without this
       // route yet) just means no picker shows, same as an empty catalog.
-      if (!mounted) return;
+      if (!mounted || requestedRoomType != _selectedRoomType) return;
       setState(() => _catalogItems = []);
     } finally {
-      if (mounted) setState(() => _catalogLoading = false);
+      if (mounted && requestedRoomType == _selectedRoomType) setState(() => _catalogLoading = false);
     }
   }
 
@@ -194,7 +205,7 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
 
   Future<void> _pickImage(ImageSource source) async {
     final XFile? picked = await _picker.pickImage(source: source, imageQuality: 90);
-    if (picked == null) return;
+    if (picked == null || !mounted) return;
     setState(() {
       _pickedImage = File(picked.path);
       _additionalPhotos.clear();
@@ -207,7 +218,7 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
     final remaining = _maxAdditionalPhotos - _additionalPhotos.length;
     if (remaining <= 0) return;
     final XFile? picked = await _picker.pickImage(source: ImageSource.camera, imageQuality: 90);
-    if (picked == null) return;
+    if (picked == null || !mounted) return;
     setState(() {
       _additionalPhotos.add(File(picked.path));
     });
@@ -217,7 +228,7 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
     final remaining = _maxAdditionalPhotos - _additionalPhotos.length;
     if (remaining <= 0) return;
     final List<XFile> picked = await _picker.pickMultiImage(imageQuality: 90);
-    if (picked.isEmpty) return;
+    if (picked.isEmpty || !mounted) return;
     setState(() {
       _additionalPhotos.addAll(picked.take(remaining).map((f) => File(f.path)));
     });
@@ -274,13 +285,15 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
       final jobId = decoded['jobId'] as String;
       final resultBase64 = await _pollForResult(backendUrl, jobId);
+      if (!mounted) return;
       setState(() {
         _resultImage = base64Decode(resultBase64);
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() => _errorMessage = 'Failed to restyle: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
