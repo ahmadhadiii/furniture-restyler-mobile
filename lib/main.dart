@@ -41,6 +41,16 @@ const List<(String, String)> _roomTypeOptions = [
   ('dining_room', 'Dining Room'),
 ];
 
+// Live AR furniture placement (ArFurniturePlacementPage - pick a real
+// product, see it live through the camera) was deprioritized in favor of the
+// photo+AI "Restyle Room" flow below, which doesn't depend on ARCore device
+// certification (neither test phone this project used was ARCore-certified)
+// and has been the more reliable path throughout. Flip this back to true to
+// re-show the "Design Room in AR" entry point - none of that feature's code
+// was removed. AR room-SCANNING for dimensions (ArRoomScanPage, the "Scan
+// with AR" button) is a separate feature and stays enabled either way.
+const bool _showLiveArPlacement = false;
+
 // Independent of _roomTypeOptions/RoomType/LoRA selection above - these are
 // AR-only object-placement categories (see ArFurniturePlacementPage), not
 // tied to the SDXL whole-photo restyle flow at all. Extend here once a new
@@ -647,23 +657,25 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
                     ),
                   ),
                 ],
-                const SizedBox(height: 16),
-                const Text(
-                  'Or build your room with real furniture (optional)',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Pick each piece - sofa, coffee table, and more - one at a time and place the '
-                  'ACTUAL product in AR, instead of generating an approximated photo below.',
-                  style: TextStyle(fontSize: 12, color: Colors.black54),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _designRoomInAr,
-                  icon: const Icon(Icons.chair_alt),
-                  label: const Text('Design Room in AR'),
-                ),
+                if (_showLiveArPlacement) ...[
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Or build your room with real furniture (optional)',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Pick each piece - sofa, coffee table, and more - one at a time and place the '
+                    'ACTUAL product in AR, instead of generating an approximated photo below.',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _designRoomInAr,
+                    icon: const Icon(Icons.chair_alt),
+                    label: const Text('Design Room in AR'),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 FilledButton.icon(
                   onPressed: _isLoading ? null : _restyle,
