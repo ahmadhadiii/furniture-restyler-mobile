@@ -40,6 +40,14 @@ const List<(String, String)> _roomTypeOptions = [
   ('dining_room', 'Dining Room'),
 ];
 
+// Room types with a real per-product catalog prepared server-side (see
+// FurnitureCatalogService.CATALOG_KEYS on the backend - keep in sync).
+// Fetching for any other room type is guaranteed to 400, since the backend
+// validates catalogKey against that same list - skip the request entirely
+// rather than relying on the catch-and-hide-errors fallback in
+// _fetchCatalog to paper over an outcome we already know in advance.
+const Set<String> _catalogBackedRoomTypes = {'living_room_sofa', 'living_room_sectional'};
+
 const List<(String, String)> _colorOptions = [
   ('white', 'White'),
   ('cream', 'Cream'),
@@ -48,7 +56,6 @@ const List<(String, String)> _colorOptions = [
   ('black', 'Black'),
   ('natural_wood', 'Natural Wood'),
 ];
-
 
 class _RestyleHomePageState extends State<RestyleHomePage> {
   final ImagePicker _picker = ImagePicker();
@@ -94,12 +101,14 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
     // changes, not just at submit time.
     _roomLengthController.addListener(_onRoomDimensionsChanged);
     _roomWidthController.addListener(_onRoomDimensionsChanged);
+    _roomHeightController.addListener(_onRoomDimensionsChanged);
   }
 
   @override
   void dispose() {
     _roomLengthController.removeListener(_onRoomDimensionsChanged);
     _roomWidthController.removeListener(_onRoomDimensionsChanged);
+    _roomHeightController.removeListener(_onRoomDimensionsChanged);
     _backendUrlController.dispose();
     _roomLengthController.dispose();
     _roomWidthController.dispose();
@@ -116,35 +125,46 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
     return null;
   }
 
-  /// Compares the selected product's real width against the room's real
-  /// dimensions and returns a plain-language warning if it likely won't
-  /// physically fit - null when there's nothing to warn about (no product
-  /// selected, no room dimensions entered yet, or it's a comfortable fit).
-  /// This is a rough "does it fit at all" check (against the room's two
-  /// floor dimensions), not true 3D placement - the app has no way to know
-  /// which specific wall a piece would actually go against.
+  /// Compares the selected product's real width/height against the room's
+  /// real dimensions and returns a plain-language warning if it likely
+  /// won't physically fit - null when there's nothing to warn about (no
+  /// product selected, no room dimensions entered yet, or it's a
+  /// comfortable fit). This is a rough "does it fit at all" check (width
+  /// against the room's two floor dimensions, height against ceiling
+  /// height), not true 3D placement - the app has no way to know which
+  /// specific wall a piece would actually go against.
   String? get _furnitureFitWarning {
     final item = _selectedCatalogItem;
-    final itemWidthCm = item?.widthCm;
-    if (itemWidthCm == null) return null;
+    if (item == null) return null;
 
     final roomLengthM = double.tryParse(_roomLengthController.text.trim());
     final roomWidthM = double.tryParse(_roomWidthController.text.trim());
-    if (roomLengthM == null || roomWidthM == null) return null;
+    final itemWidthCm = item.widthCm;
+    if (itemWidthCm != null && roomLengthM != null && roomWidthM != null) {
+      final itemWidthM = itemWidthCm / 100;
+      final roomMax = roomLengthM > roomWidthM ? roomLengthM : roomWidthM;
+      final roomMin = roomLengthM < roomWidthM ? roomLengthM : roomWidthM;
 
-    final itemWidthM = itemWidthCm / 100;
-    final roomMax = roomLengthM > roomWidthM ? roomLengthM : roomWidthM;
-    final roomMin = roomLengthM < roomWidthM ? roomLengthM : roomWidthM;
-
-    if (itemWidthM > roomMax) {
-      return '"${item!.name}" is ${itemWidthCm.toStringAsFixed(0)}cm wide - '
-          'that\'s wider than even the longest side of your room (${roomMax.toStringAsFixed(1)}m). '
-          'It will not fit.';
+      if (itemWidthM > roomMax) {
+        return '"${item.name}" is ${itemWidthCm.toStringAsFixed(0)}cm wide - '
+            'that\'s wider than even the longest side of your room (${roomMax.toStringAsFixed(1)}m). '
+            'It will not fit.';
+      }
+      if (itemWidthM > roomMin) {
+        return '"${item.name}" is ${itemWidthCm.toStringAsFixed(0)}cm wide - '
+            'it will only fit against your room\'s longer wall (${roomMax.toStringAsFixed(1)}m), '
+            'not the shorter one (${roomMin.toStringAsFixed(1)}m).';
+      }
     }
-    if (itemWidthM > roomMin) {
-      return '"${item!.name}" is ${itemWidthCm.toStringAsFixed(0)}cm wide - '
-          'it will only fit against your room\'s longer wall (${roomMax.toStringAsFixed(1)}m), '
-          'not the shorter one (${roomMin.toStringAsFixed(1)}m).';
+
+    final roomHeightM = double.tryParse(_roomHeightController.text.trim());
+    final itemHeightCm = item.heightCm;
+    if (itemHeightCm != null && roomHeightM != null) {
+      final itemHeightM = itemHeightCm / 100;
+      if (itemHeightM > roomHeightM) {
+        return '"${item.name}" is ${itemHeightCm.toStringAsFixed(0)}cm tall - '
+            'taller than your room\'s measured height (${roomHeightM.toStringAsFixed(1)}m).';
+      }
     }
     return null;
   }
@@ -152,6 +172,10 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
   Future<void> _fetchCatalog() async {
     final backendUrl = _backendUrlController.text.trim();
     if (backendUrl.isEmpty) return;
+    if (!_catalogBackedRoomTypes.contains(_selectedRoomType)) {
+      setState(() => _catalogItems = []);
+      return;
+    }
     // Captured so a response for a room type the user has since switched
     // away from (e.g. tapping two chips quickly on a slow connection)
     // can't overwrite the catalog for whatever's actually selected now -

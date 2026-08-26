@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'vector3.dart';
 import 'quaternion.dart';
 import 'ar_animation.dart';
@@ -30,20 +28,6 @@ class ARNode {
   /// List of animations for this model
   final List<ARAnimation>? animations;
 
-  // Fork-local addition (see AugenARView.swift's loadTexturedPlane): the
-  // upstream package's NodeType.model / modelPath+modelFormat path is an
-  // unimplemented stub on both iOS and Android (renders a placeholder cube
-  // regardless of what model is requested - confirmed by reading the native
-  // source, not just its docs). Rather than depend on a real GLB/USDZ
-  // loader that doesn't exist yet, this lets a "model" node carry raw image
-  // bytes + real-world plane dimensions instead, which the patched iOS side
-  // renders as a procedurally-generated textured plane
-  // (MeshResource.generatePlane + TextureResource) - the ACTUAL photo, no
-  // 3D file format involved at all.
-  final Uint8List? imageBytes;
-  final double? planeWidthMeters;
-  final double? planeHeightMeters;
-
   ARNode({
     required this.id,
     required this.type,
@@ -54,18 +38,9 @@ class ARNode {
     this.modelPath,
     this.modelFormat,
     this.animations,
-    this.imageBytes,
-    this.planeWidthMeters,
-    this.planeHeightMeters,
   }) : assert(
-         type != NodeType.model || modelPath != null || imageBytes != null,
-         'modelPath or imageBytes is required when type is NodeType.model',
-       ),
-       assert(
-         imageBytes == null || (planeWidthMeters != null && planeHeightMeters != null),
-         'planeWidthMeters and planeHeightMeters are required when imageBytes is set - '
-         'the native textured-plane path silently falls back to a placeholder cube '
-         '(reporting success) if either is missing, which is very hard to catch without this.',
+         type != NodeType.model || modelPath != null,
+         'modelPath is required when type is NodeType.model',
        );
 
   factory ARNode.fromMap(Map<dynamic, dynamic> map) {
@@ -152,9 +127,6 @@ class ARNode {
       if (format != null) 'modelFormat': format.name,
       if (animations != null && animations!.isNotEmpty)
         'animations': animations!.map((a) => a.toMap()).toList(),
-      if (imageBytes != null) 'imageBytes': imageBytes,
-      if (planeWidthMeters != null) 'planeWidthMeters': planeWidthMeters,
-      if (planeHeightMeters != null) 'planeHeightMeters': planeHeightMeters,
     };
   }
 
@@ -168,9 +140,6 @@ class ARNode {
     String? modelPath,
     ModelFormat? modelFormat,
     List<ARAnimation>? animations,
-    Uint8List? imageBytes,
-    double? planeWidthMeters,
-    double? planeHeightMeters,
   }) {
     return ARNode(
       id: id ?? this.id,
@@ -182,9 +151,6 @@ class ARNode {
       modelPath: modelPath ?? this.modelPath,
       modelFormat: modelFormat ?? this.modelFormat,
       animations: animations ?? this.animations,
-      imageBytes: imageBytes ?? this.imageBytes,
-      planeWidthMeters: planeWidthMeters ?? this.planeWidthMeters,
-      planeHeightMeters: planeHeightMeters ?? this.planeHeightMeters,
     );
   }
 

@@ -300,29 +300,11 @@ class AugenARView: NSObject, FlutterPlatformView {
 
         let anchor = AnchorEntity(world: position)
 
-        // Handle custom 3D model loading
+        // Handle custom 3D model loading. loadCustomModel's actual body is an
+        // unimplemented stub (see its own comment) - it was never a working
+        // code path in the published package, but is left wired up here for
+        // completeness/parity with upstream augen.
         if type.lowercased() == "model" {
-            // Fork-local: prefer the real-photo textured-plane path (see
-            // loadTexturedPlane) whenever imageBytes is supplied - the
-            // upstream modelPath/modelFormat (GLB/USDZ file) path below it
-            // is still wired up for completeness, but loadCustomModel's
-            // actual body is an unimplemented stub (see its own comment) -
-            // it was never a working code path in the published package.
-            if let imageBytesData = (arguments["imageBytes"] as? FlutterStandardTypedData)?.data,
-               let widthMeters = (arguments["planeWidthMeters"] as? NSNumber)?.floatValue,
-               let heightMeters = (arguments["planeHeightMeters"] as? NSNumber)?.floatValue {
-                if let error = loadTexturedPlane(
-                    imageData: imageBytesData,
-                    widthMeters: widthMeters,
-                    heightMeters: heightMeters,
-                    objectPosition: position,
-                    anchor: anchor
-                ) {
-                    return .failure(error)
-                }
-                return .success(anchor)
-            }
-
             let modelPath = arguments["modelPath"] as? String
             let modelData = arguments["modelData"] as? FlutterStandardTypedData
             let modelFormat = arguments["modelFormat"] as? String
@@ -408,81 +390,6 @@ class AugenARView: NSObject, FlutterPlatformView {
         modelEntity.scale = scale
         modelEntity.orientation = rotation
         anchor.addChild(modelEntity)
-    }
-
-    /// Fork-local addition: builds a real AR object from an actual photo,
-    /// with NO 3D model file format involved. RealityKit generates the
-    /// plane mesh itself (MeshResource.generatePlane) and the photo becomes
-    /// its texture (TextureResource.generate) - this is what actually backs
-    /// the "place the real chosen product" feature, since upstream's
-    /// GLB/USDZ loadCustomModel above is an unimplemented stub.
-    ///
-    /// generatePlane(width:height:) produces a plane CENTERED at local
-    /// origin, normal along +Z. The Dart side treats `position` as a floor
-    /// anchor point (bottom edge, not center) - see
-    /// ar_furniture_placement_page.dart - so the entity is offset upward by
-    /// half its height here to stand on the floor at that point instead of
-    /// floating with its center there.
-    /// Returns nil on success, or the FlutterError to report on failure - does
-    /// NOT call `result` itself, so the caller (buildAnchor) is the single
-    /// place that decides whether to register the anchor into
-    /// `arView.scene`/`nodes`.
-    private func loadTexturedPlane(
-        imageData: Data,
-        widthMeters: Float,
-        heightMeters: Float,
-        objectPosition: SIMD3<Float>,
-        anchor: AnchorEntity
-    ) -> FlutterError? {
-        guard let uiImage = UIImage(data: imageData), let cgImage = uiImage.cgImage else {
-            return FlutterError(
-                code: "INVALID_IMAGE",
-                message: "Could not decode imageBytes into an image",
-                details: nil
-            )
-        }
-
-        do {
-            let textureResource = try TextureResource.generate(from: cgImage, options: .init(semantic: .color))
-            var material = UnlitMaterial()
-            material.color = .init(texture: .init(textureResource))
-
-            let mesh = MeshResource.generatePlane(width: widthMeters, height: heightMeters)
-            let modelEntity = ModelEntity(mesh: mesh, materials: [material])
-            modelEntity.orientation = billboardRotation(objectPosition: objectPosition)
-            modelEntity.position = SIMD3<Float>(0, heightMeters / 2, 0)
-
-            anchor.addChild(modelEntity)
-            return nil
-        } catch {
-            return FlutterError(
-                code: "TEXTURE_ERROR",
-                message: "Could not build texture from image: \(error)",
-                details: nil
-            )
-        }
-    }
-
-    /// generatePlane's mesh normal points along local +Z. The node used to
-    /// get zero rotation applied (the Dart side never set one - it only
-    /// used the hit-test position, not its rotation), which meant every
-    /// placed item faced the same fixed, arbitrary world direction no
-    /// matter where the user was standing when they tapped to place it -
-    /// RealityKit back-face-culls by default, so from most angles the
-    /// "placed" item was simply invisible or edge-on. Rotates the plane, at
-    /// placement time, to face the camera's position instead - a yaw-only
-    /// turn (the Y component of the direction is zeroed) so the plane
-    /// stays upright rather than tilting to match the camera's height
-    /// above/below the floor hit point.
-    private func billboardRotation(objectPosition: SIMD3<Float>) -> simd_quatf {
-        let cameraPosition = arView.cameraTransform.translation
-        var toCamera = cameraPosition - objectPosition
-        toCamera.y = 0
-        guard simd_length(toCamera) > 0.0001 else {
-            return simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
-        }
-        let direction = simd_normalize(toCamera)
-        return simd_quatf(from: SIMD3<Float>(0, 0, 1), to: direction)
     }
 
     private func removeNode(arguments: [String: Any], result: @escaping FlutterResult) {
