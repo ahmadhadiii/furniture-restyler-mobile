@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
-import 'ar_furniture_placement_page.dart';
 import 'ar_room_scan_page.dart';
 import 'furniture_catalog_item.dart';
 
@@ -39,27 +38,6 @@ const List<(String, String)> _roomTypeOptions = [
   ('living_room_sectional', 'Living Room (Sectional)'),
   ('bedroom', 'Bedroom'),
   ('dining_room', 'Dining Room'),
-];
-
-// Live AR furniture placement (ArFurniturePlacementPage - pick a real
-// product, see it live through the camera) was deprioritized in favor of the
-// photo+AI "Restyle Room" flow below, which doesn't depend on ARCore device
-// certification (neither test phone this project used was ARCore-certified)
-// and has been the more reliable path throughout. Flip this back to true to
-// re-show the "Design Room in AR" entry point - none of that feature's code
-// was removed. AR room-SCANNING for dimensions (ArRoomScanPage, the "Scan
-// with AR" button) is a separate feature and stays enabled either way.
-const bool _showLiveArPlacement = false;
-
-// Independent of _roomTypeOptions/RoomType/LoRA selection above - these are
-// AR-only object-placement categories (see ArFurniturePlacementPage), not
-// tied to the SDXL whole-photo restyle flow at all. Extend here once a new
-// category's catalog data is prepared server-side (see
-// FurnitureCatalogService's CATALOG_KEYS).
-const List<FurnitureCategory> _arCategories = [
-  FurnitureCategory(catalogKey: 'living_room_sofa', label: 'Sofa'),
-  FurnitureCategory(catalogKey: 'living_room_sectional', label: 'Sectional'),
-  FurnitureCategory(catalogKey: 'living_room_coffee_table', label: 'Coffee Table'),
 ];
 
 const List<(String, String)> _colorOptions = [
@@ -337,20 +315,6 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
       }
     }
     throw Exception('Timed out waiting for the result after ${overallTimeout.inMinutes} minutes');
-  }
-
-  Future<void> _designRoomInAr() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ArFurniturePlacementPage(
-          backendUrlBase: _backendUrlBase,
-          categories: _arCategories,
-          roomLengthM: double.tryParse(_roomLengthController.text.trim()),
-          roomWidthM: double.tryParse(_roomWidthController.text.trim()),
-          roomHeightM: double.tryParse(_roomHeightController.text.trim()),
-        ),
-      ),
-    );
   }
 
   Future<void> _scanRoomWithAr() async {
@@ -655,25 +619,6 @@ class _RestyleHomePageState extends State<RestyleHomePage> {
                         ),
                       ],
                     ),
-                  ),
-                ],
-                if (_showLiveArPlacement) ...[
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Or build your room with real furniture (optional)',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    'Pick each piece - sofa, coffee table, and more - one at a time and place the '
-                    'ACTUAL product in AR, instead of generating an approximated photo below.',
-                    style: TextStyle(fontSize: 12, color: Colors.black54),
-                  ),
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed: _designRoomInAr,
-                    icon: const Icon(Icons.chair_alt),
-                    label: const Text('Design Room in AR'),
                   ),
                 ],
                 const SizedBox(height: 16),
